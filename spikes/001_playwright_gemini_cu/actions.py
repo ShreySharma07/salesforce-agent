@@ -48,6 +48,29 @@ def execute_action(
             result["target"] = grounding.describe_ref(ref)
             loc.click(timeout=5000)
 
+        elif name == "click_xy":
+            # Vision-based fallback for elements that don't appear in our
+            # grounding (closed shadow DOM, canvas widgets, custom components).
+            # Coordinates are in actual viewport pixels.
+            x = int(action["x"])
+            y = int(action["y"])
+            page.mouse.click(x, y)
+            result["x"] = x
+            result["y"] = y
+
+        elif name == "fill_xy":
+            # Click at xy, clear, type. Used when a text input isn't grounded.
+            x = int(action["x"])
+            y = int(action["y"])
+            text = str(action.get("text", ""))
+            page.mouse.click(x, y)
+            page.keyboard.press("ControlOrMeta+A")
+            page.keyboard.press("Backspace")
+            page.keyboard.type(text)
+            result["x"] = x
+            result["y"] = y
+            result["text"] = text
+
         elif name == "fill":
             ref = int(action["ref"])
             text = str(action.get("text", ""))
@@ -92,6 +115,19 @@ def execute_action(
         elif name == "stuck":
             result["stuck"] = True
             result["reason"] = action.get("reason", "")
+        
+        elif name == "click_text":
+            # Locate element by visible text and click it. Works even when
+            # the element isn't in our DOM grounding (web components, etc.)
+            text = str(action["text"])
+            exact = bool(action.get("exact", False))
+            try:
+                loc = page.get_by_text(text, exact=exact).first
+                loc.click(timeout=5000)
+                result["text"] = text
+            except Exception as e:
+                result["error"] = f"click_text failed: {e}"
+                return result
 
         else:
             result["error"] = f"unknown action: {name}"

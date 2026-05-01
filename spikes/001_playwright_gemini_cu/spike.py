@@ -49,14 +49,13 @@ def c(msg: str, color: str = "white") -> None:
 
 
 def prompt_for_task(default_url: str, default_task: str) -> tuple[str, str]:
-    """Interactive prompt. Enter = accept default."""
     c("\n== Task configuration ==", "magenta")
-    c(f"Default URL:  {default_url}", "white")
-    url = input("URL (enter to accept default): ").strip() or default_url
-
-    c(f"\nDefault task: {default_task}", "white")
-    c("Task (enter to accept default, or type a new goal):", "white")
+    c("Task (describe what you want the agent to do):", "white")
     task = input("> ").strip() or default_task
+
+    c(f"\nStarting URL (optional - press Enter to start on Google):", "white")
+    c(f"Default: {default_url}", "white")
+    url = input("URL: ").strip() or "https://www.google.com"
     return url, task
 
 
@@ -139,7 +138,7 @@ def main() -> int:
     mode = args.mode
     model = args.model or os.getenv("CU_MODEL") or DEFAULT_MODELS[mode]
 
-    default_url = os.getenv("TASK_URL", "https://the-internet.herokuapp.com/login")
+    default_url = os.getenv("TASK_URL", "https://www.google.com")
     default_task = os.getenv(
         "TASK_PROMPT",
         'Log into this website with username "tomsmith" and password '

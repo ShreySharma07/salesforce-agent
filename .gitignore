@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+.env.local
+spikes/**/traces/*
+!spikes/**/traces/.gitkeep
+node_modules/
+.next/
+.DS_Store
+.vscode/
+.idea/
+backend/.env.example

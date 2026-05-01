@@ -26,15 +26,18 @@ At each turn you will receive:
   - The current URL
   - The page TITLE
   - A numbered list of interactive elements on the page (the "accessibility tree")
-  - A screenshot of the current page
+  - A screenshot of the current page (1440 x 900 viewport)
 
 You MUST respond with a single JSON object - no prose, no markdown fences. Schema:
 
-  {"thought": "<one short sentence of reasoning>", "action": "<one of: click | fill | press | navigate | scroll | wait | done | stuck>", ...args}
+  {"thought": "<one short sentence of reasoning>", "action": "<one of: click | fill | click_xy | fill_xy | press | navigate | scroll | wait | done | stuck>", ...args}
 
 Action schemas:
   {"thought": "...", "action": "click", "ref": <int>}
   {"thought": "...", "action": "fill", "ref": <int>, "text": "<value>"}
+  {"thought": "...", "action": "click_xy", "x": <int>, "y": <int>}      # FALLBACK - see below
+  {"thought": "...", "action": "fill_xy", "x": <int>, "y": <int>, "text": "<value>"}  # FALLBACK
+  {"thought": "...", "action": "click_text", "text": "<visible text on the element or nearby label>", "exact": false}
   {"thought": "...", "action": "press", "key": "Enter"}
   {"thought": "...", "action": "navigate", "url": "https://..."}
   {"thought": "...", "action": "scroll", "direction": "down"}
@@ -43,15 +46,23 @@ Action schemas:
   {"thought": "...", "action": "stuck", "reason": "<what you need from the human>"}
 
 Rules:
-  - Refer to elements ONLY by their # number from the accessibility tree.
+  - Action priority for clicking elements not in the tree:
+    1. FIRST try click_text with the element's visible label text (e.g. "I agree to the Main Services Agreement").
+    2. If click_text fails or no nearby text exists, try click_xy with coordinates estimated from the screenshot
+       (viewport is 1440 wide by 900 tall, (0,0) top-left).
+  - If a previous action did NOT change the page state (same URL, same error message), do NOT repeat it.
+    Try a different approach: different text, different coordinates, scroll first, or emit `stuck`.
+  - Refer to elements by their # number from the accessibility tree wherever possible.
   - Prefer `fill` over `click`+`press` for text inputs.
   - Emit `done` ONLY when the page title, URL, or visible content demonstrably shows the goal is met.
     The `evidence` field MUST quote something specific from the current page (title text, a headline,
     or a URL fragment) - not a generic "I clicked it" claim. If you cannot cite concrete evidence,
     DO NOT emit done; keep working.
-  - Emit `stuck` if the expected element is missing, the page is empty, or something unexpected happens.
+  - Emit `stuck` only after trying click_xy / fill_xy fallbacks for missing elements.
   - Never invent refs not present in the current tree.
   - Never include any text outside the JSON object.
+  - If the page is google.com or another search engine and you need information from elsewhere,
+    use `fill` on the search box and `press` Enter, OR use `navigate` directly to a known URL.
 """
 
 
@@ -75,7 +86,8 @@ def parse_action(text: str) -> dict | None:
         return None
 
 
-def build_turn_prompt(goal: str, url: str, title: str, a11y: str, last_observation: dict | None) -> str:
+def build_turn_prompt(goal: str, url: str, title: str, a11y: str,
+                      recent_actions: list[dict]) -> str:
     parts = [
         f"GOAL: {goal}",
         f"CURRENT URL: {url}",
@@ -83,8 +95,10 @@ def build_turn_prompt(goal: str, url: str, title: str, a11y: str, last_observati
         "ACCESSIBILITY TREE:",
         a11y,
     ]
-    if last_observation:
-        parts.append(f"LAST OBSERVATION: {json.dumps(last_observation)}")
+    if recent_actions:
+        parts.append("RECENT ACTIONS (most recent last - if you see a repeat that didn't work, try something different):")
+        for i, a in enumerate(recent_actions[-5:], 1):
+            parts.append(f"  {i}. {json.dumps(a)}")
     parts.append("Emit one action as a single JSON object.")
     return "\n\n".join(parts)
 
@@ -121,7 +135,7 @@ def run_loop(
         response_mime_type="application/json",
     )
     grounding = Grounding(page)
-    last_observation: dict | None = None
+    recent_actions: list[dict] = []
 
     for turn in range(1, turn_limit + 1):
         budget.check(llm)
@@ -139,7 +153,7 @@ def run_loop(
         log(f"URL: {url_before}", "white")
         log(f"Title: {title_before}", "white")
 
-        user_text = build_turn_prompt(goal, url_before, title_before, a11y, last_observation)
+        user_text = build_turn_prompt(goal, url_before, title_before, a11y, recent_actions)
 
         response = llm.generate(
             contents=[Content(role="user", parts=[
@@ -187,6 +201,6 @@ def run_loop(
         budget.record_action()
         log(f"  -> {observation}", "yellow")
         dump_turn(trace_dir, turn, url_before, a11y, shot, raw_text, action, observation)
-        last_observation = observation
+        recent_actions.append({"action": action, "observation": observation})
 
     return {"outcome": "turn_limit", "turns_used": turn_limit, "final_message": None}
