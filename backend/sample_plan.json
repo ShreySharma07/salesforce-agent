@@ -1,0 +1,55 @@
+{
+  "id": "plan_b0ac1077ed",
+  "automation_id": null,
+  "version": 1,
+  "status": "pending_approval",
+  "goal": "Open a specific email in Gmail and navigate to the Simplify website via a link within that email.",
+  "summary": "This automation plan navigates to Gmail, opens an email from 'SWE List' with the subject '60 New Internships Posted Today', and then clicks the 'Link to Simplify' within the email body to reach the Simplify website.",
+  "steps": [
+    {
+      "id": "step_001",
+      "kind": "navigate",
+      "description": "Navigate to Gmail inbox.",
+      "details": {
+        "url": "https://mail.google.com/mail/u/0/",
+        "expected_title_contains": "Inbox - "
+      },
+      "on_failure": "pause"
+    },
+    {
+      "id": "step_002",
+      "kind": "ui_action",
+      "description": "Open the email from 'SWE List' with the subject '60 New Internships Posted Today'.",
+      "details": {
+        "intent": "click",
+        "target_description": "Email from 'SWE List' with subject '60 New Internships Posted Today'",
+        "value": null
+      },
+      "on_failure": "pause"
+    },
+    {
+      "id": "step_003",
+      "kind": "ui_action",
+      "description": "Click the 'Link to Simplify' within the email body.",
+      "details": {
+        "intent": "click",
+        "target_description": "Link to Simplify",
+        "value": null
+      },
+      "on_failure": "pause"
+    }
+  ],
+  "decision_rules": [],
+  "required_credentials": [
+    {
+      "name": "Gmail",
+      "scopes": []
+    }
+  ],
+  "source_video_id": "aa8b55c3dcf8",
+  "created_at": "2026-05-03T10:49:15.307474",
+  "created_by": null,
+  "approved_at": null,
+  "approved_by": null,
+  "correction_history": []
+}

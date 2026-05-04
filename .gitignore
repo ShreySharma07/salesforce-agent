@@ -12,3 +12,4 @@ node_modules/
 .vscode/
 .idea/
 backend/.env.example
+backend/.local_storage

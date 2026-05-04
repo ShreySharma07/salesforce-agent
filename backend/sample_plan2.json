@@ -1,0 +1,82 @@
+{
+  "id": "plan_bb33f46a17",
+  "automation_id": null,
+  "version": 1,
+  "status": "pending_approval",
+  "goal": "Extract internship listings from a specific email in Gmail and save them to a new note in the Notes application.",
+  "summary": "This automation navigates to the Gmail inbox and opens an email containing internship listings. It then extracts these listings from the email body. Finally, it opens the Notes application and creates a new note, populating it with the extracted internship titles.",
+  "steps": [
+    {
+      "id": "step_001",
+      "kind": "navigate",
+      "description": "Navigate to the Gmail inbox.",
+      "details": {
+        "url": "https://mail.google.com/mail/u/0/#inbox",
+        "expected_title_contains": "Inbox"
+      },
+      "on_failure": "pause"
+    },
+    {
+      "id": "step_002",
+      "kind": "ui_action",
+      "description": "Open the email titled '52 New Internships Posted Today' from 'SWE List'.",
+      "details": {
+        "intent": "click",
+        "target_description": "Email with subject '52 New Internships Posted Today' from 'SWE List <noreply@swelist.com>'"
+      },
+      "on_failure": "pause"
+    },
+    {
+      "id": "step_003",
+      "kind": "extract",
+      "description": "Extract the list of internship titles from the email body.",
+      "details": {
+        "variable_name": "internship_titles",
+        "description": "List of internship titles highlighted in the email."
+      },
+      "on_failure": "pause"
+    },
+    {
+      "id": "step_004",
+      "kind": "ui_action",
+      "description": "Open the Notes application.",
+      "details": {
+        "intent": "open_application",
+        "target_description": "Notes application"
+      },
+      "on_failure": "pause"
+    },
+    {
+      "id": "step_005",
+      "kind": "ui_action",
+      "description": "Create a new note and add the extracted internship titles.",
+      "details": {
+        "intent": "create_note",
+        "target_description": "New note in Notes application",
+        "value": "${internship_titles}"
+      },
+      "on_failure": "pause"
+    }
+  ],
+  "decision_rules": [],
+  "required_credentials": [
+    {
+      "name": "Gmail",
+      "scopes": [
+        "read"
+      ]
+    },
+    {
+      "name": "Notes",
+      "scopes": [
+        "write"
+      ]
+    }
+  ],
+  "source_video_id": "81a3ccca4b50",
+  "created_at": "2026-05-03T18:34:20.442266",
+  "created_by": null,
+  "approved_at": null,
+  "approved_by": null,
+  "correction_history": []
+}

@@ -29,14 +29,19 @@ class FrameCaption:
     description: str
 
 
-CAPTION_SYSTEM_PROMPT = """You are watching a screen recording of someone performing a task on their computer. You will receive frames in chronological batches. For EACH frame, output ONE concise sentence describing what is visible AND what the user appears to be doing. Focus on:
-  - The application/website visible
-  - What the user is interacting with (input field, button, menu)
-  - What appears to have just happened (e.g. "form submitted, success message visible")
+CAPTION_SYSTEM_PROMPT = """You are watching a screen recording of someone performing a task on their computer. You will receive frames in chronological batches.
 
-DO NOT speculate beyond what is visible. DO NOT add filler.
+For EACH frame, output ONE detailed sentence that captures:
+  - The application/website visible (with URL if shown in browser)
+  - SPECIFIC text visible on screen — exact subject lines, sender names, button labels, headings
+  - What the user is interacting with (input field, button, link)
+  - What just happened (e.g. "email opened, body now visible")
+
+Quote literal text in single quotes. Example: "Gmail inbox visible at mail.google.com/u/0/#inbox, top email shows sender 'simplify-noreply' with subject 'Your Daily Internship Digest - Jan 28'."
+
+DO NOT speculate beyond what is visible. DO NOT generalize ("an email" → name the actual subject). DO NOT add filler.
+
 Output as a JSON array of strings, one per frame, in order. No prose, no fences."""
-
 
 def caption_keyframes(
     manifest: VideoManifest,

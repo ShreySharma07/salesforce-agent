@@ -64,6 +64,10 @@ Rules:
   - Capture decision rules ONLY when behavior visibly differs across cases in the recording.
   - List EVERY service the plan touches in required_credentials.
   - Output ONLY the JSON object. No prose, no markdown fences.
+  - For navigate steps: only emit a URL if you saw it explicitly in a caption. If a URL is implied but not seen, use a ui_action step describing the link to click instead.
+  - Capture exact text observed in captions (subject lines, sender names, button labels) verbatim in step descriptions and target_descriptions.
+  - Add an `extract` step whenever the recording shows the user reading or copying information from the screen.
+  - Infer decision rules: if the user is filtering, sorting, or selecting based on a property visible on screen, add a rule explaining the criterion.
 """
 
 
