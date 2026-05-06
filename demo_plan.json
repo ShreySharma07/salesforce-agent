@@ -1,0 +1,25 @@
+{
+  "plan": {
+    "id": "plan_smoke",
+    "goal": "Find Salesforce founding year",
+    "steps": [
+      {
+        "id": "step_001",
+        "kind": "navigate",
+        "description": "Open Salesforce Wikipedia page",
+        "details": {"url": "https://en.wikipedia.org/wiki/Salesforce"}
+      },
+      {
+        "id": "step_002",
+        "kind": "extract",
+        "description": "Extract the founding year",
+        "details": {
+          "variable_name": "founded_year",
+          "description": "the year Salesforce was founded, shown in the page infobox"
+        }
+      }
+    ]
+  },
+  "max_steps": 6,
+  "max_seconds": 120
+}
