@@ -1,8 +1,15 @@
 pyproject.toml
 app/__init__.py
 app/config.py
+app/main.py
 app/agent/__init__.py
+app/agent/keyframe_captioner.py
+app/agent/plan_generator.py
+app/agent/video_processor.py
 app/api/__init__.py
+app/api/automations.py
+app/api/plans.py
+app/api/runs.py
 app/core/__init__.py
 app/core/budget/__init__.py
 app/core/guardrails/__init__.py
@@ -17,6 +24,14 @@ app/schemas/automation.py
 app/schemas/plan.py
 app/schemas/run.py
 app/services/__init__.py
+app/services/run_repo.py
+app/services/storage.py
+app/services/sandbox/__init__.py
+app/services/sandbox/base.py
+app/services/sandbox/factory.py
+app/services/sandbox/fargate.py
+app/services/sandbox/local_docker.py
+app/services/sandbox/modal.py
 app/workflows/__init__.py
 salesforce_agent_backend.egg-info/PKG-INFO
 salesforce_agent_backend.egg-info/SOURCES.txt
@@ -24,4 +39,6 @@ salesforce_agent_backend.egg-info/dependency_links.txt
 salesforce_agent_backend.egg-info/requires.txt
 salesforce_agent_backend.egg-info/top_level.txt
 tests/test_llm.py
+tests/test_phase_1b5.py
 tests/test_schemas.py
+tests/test_video_pipeline.py
