@@ -27,7 +27,7 @@ from pathlib import Path
 import httpx
 
 
-async def run_e2e(plan_path: Path, backend: str, name: str, watch: bool) -> int:
+async def run_e2e(plan_path: Path, backend: str, name: str, watch: bool, auto_open: bool = True) -> int:
     plan_data = json.loads(plan_path.read_text())
     plan_id = plan_data["id"]
 
@@ -71,6 +71,7 @@ async def run_e2e(plan_path: Path, backend: str, name: str, watch: bool) -> int:
 
         # Step 5: poll until done
         print("\nPolling run status...")
+        opened_view = False
         while True:
             r = await client.get(f"/runs/{run_id}")
             r.raise_for_status()
@@ -78,6 +79,17 @@ async def run_e2e(plan_path: Path, backend: str, name: str, watch: bool) -> int:
             status = run["status"]
             live = run.get("live_view_url")
             print(f"  [{status}]" + (f"  watch: {live}" if live and watch else ""))
+
+            # Auto-open the live view in browser the moment it becomes available
+            if auto_open and live and not opened_view:
+                import subprocess
+                subprocess.Popen(
+                    ["open", live],  # macOS - use "xdg-open" on Linux, "start" on Windows
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                opened_view = True
+                print(f"  → opened in browser")
             if status in ("completed", "failed", "canceled", "budget_exceeded"):
                 break
             await asyncio.sleep(2)
@@ -93,8 +105,10 @@ def main() -> int:
     ap.add_argument("--backend", default="http://localhost:8001")
     ap.add_argument("--name", default="E2E Test", help="automation name")
     ap.add_argument("--watch", action="store_true", help="print live-view URL each poll")
+    ap.add_argument("--no-open", action="store_true",
+                    help="don't auto-open the live view in the browser (default: auto-open)")
     args = ap.parse_args()
-    return asyncio.run(run_e2e(args.plan, args.backend, args.name, args.watch))
+    return asyncio.run(run_e2e(args.plan, args.backend, args.name, args.watch, not args.no_open))
 
 
 if __name__ == "__main__":

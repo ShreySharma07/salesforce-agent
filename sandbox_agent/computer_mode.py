@@ -120,10 +120,29 @@ def execute_step(
             prompt += f"PREV OBSERVATION: {json.dumps(last_observation)}\n"
         prompt += "Emit one action."
 
-        response = llm.generate(
-            prompt=prompt, system=SYSTEM_PROMPT,
-            images=[shot], json_mode=True, max_tokens=512,
-        )
+        try:
+            response = llm.generate(
+                prompt=prompt, system=SYSTEM_PROMPT,
+                images=[shot], json_mode=True, max_tokens=512,
+            )
+        except Exception as llm_err:
+            err_str = str(llm_err)
+            if "Unable to process input image" in err_str or "INVALID_ARGUMENT" in err_str:
+                time.sleep(2)
+                shot = screenshot()
+                try:
+                    response = llm.generate(
+                        prompt=prompt, system=SYSTEM_PROMPT,
+                        images=[shot], json_mode=True, max_tokens=512,
+                    )
+                except Exception as retry_err:
+                    return {"status": "failed",
+                            "evidence": f"LLM image error after retry: {type(retry_err).__name__}: {retry_err}",
+                            "turns": turn}
+            else:
+                return {"status": "failed",
+                        "evidence": f"LLM error: {type(llm_err).__name__}: {llm_err}",
+                        "turns": turn}
         action = parse_action(response.text)
         if action is None:
             last_observation = {"error": "could not parse model output"}

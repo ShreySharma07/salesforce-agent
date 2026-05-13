@@ -13,6 +13,8 @@ The backend's port is 8001 by default; sandbox containers use 8000
 from __future__ import annotations
 
 import logging
+import subprocess
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -26,9 +28,38 @@ logging.basicConfig(level=logging.INFO,
 log = logging.getLogger("backend")
 
 
+def _check_sandbox_image(image: str) -> None:
+    """Warn loudly at startup if the sandbox image is missing so the
+    developer knows before they try to run a plan and hit a confusing
+    docker error 10 seconds into provisioning."""
+    result = subprocess.run(
+        ["docker", "image", "inspect", image],
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        log.warning(
+            "\n"
+            "  ╔══════════════════════════════════════════════════════╗\n"
+            "  ║  WARNING: sandbox image %r not found locally.  ║\n"
+            "  ║  Plans will fail at runtime until you build it.      ║\n"
+            "  ║  Run:                                                 ║\n"
+            "  ║    docker build -t %s -f sandbox/Dockerfile . ║\n"
+            "  ╚══════════════════════════════════════════════════════╝",
+            image, image,
+        )
+
+
 def create_app() -> FastAPI:
     settings = get_settings()
-    app = FastAPI(title="AI Agent Platform Backend", version="0.1.0")
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        if settings.sandbox_runner == "local_docker":
+            _check_sandbox_image(settings.sandbox_image)
+        yield
+
+    app = FastAPI(title="AI Agent Platform Backend", version="0.1.0",
+                  lifespan=lifespan)
 
     # CORS - permissive for dev. Tighten for prod.
     app.add_middleware(

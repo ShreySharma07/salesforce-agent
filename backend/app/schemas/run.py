@@ -14,6 +14,7 @@ class RunStatus(str, Enum):
     RUNNING = "running"
     PAUSED_FOR_INPUT = "paused_for_input"
     COMPLETED = "completed"
+    COMPLETED_WITH_FAILURES = "completed_with_failures"
     FAILED = "failed"
     CANCELED = "canceled"
     BUDGET_EXCEEDED = "budget_exceeded"

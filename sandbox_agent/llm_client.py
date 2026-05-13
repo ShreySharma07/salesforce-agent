@@ -10,6 +10,7 @@ Reads from env:
 from __future__ import annotations
 
 import os
+import re
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -44,6 +45,7 @@ class GeminiClient:
         json_mode: bool = False,
         max_tokens: int = 1024,
         temperature: float = 0.0,
+        _retry: int = 2,
     ) -> GeminiResponse:
         from google.genai import types
         from google.genai.types import Content, Part
@@ -65,9 +67,21 @@ class GeminiClient:
         config = types.GenerateContentConfig(**cfg)
 
         start = time.monotonic()
-        raw = self._client.models.generate_content(
-            model=self.model, contents=contents, config=config,
-        )
+        for attempt in range(_retry + 1):
+            try:
+                raw = self._client.models.generate_content(
+                    model=self.model, contents=contents, config=config,
+                )
+                break
+            except Exception as exc:
+                err_str = str(exc)
+                # Retry on 429 rate-limit using the server's suggested delay
+                if attempt < _retry and "429" in err_str:
+                    delay_match = re.search(r"retry[^\d]*(\d+(?:\.\d+)?)\s*s", err_str, re.I)
+                    wait = min(float(delay_match.group(1)) if delay_match else 30.0, 60.0)
+                    time.sleep(wait)
+                    continue
+                raise
         latency_ms = int((time.monotonic() - start) * 1000)
 
         usage = getattr(raw, "usage_metadata", None)

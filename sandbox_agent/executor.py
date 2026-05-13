@@ -212,7 +212,14 @@ def _run_step(page: Page, llm: GeminiClient, step: Step) -> StepResult:
         "stuck": "failed",       # both modes ran out of options
         "failed": "failed",
     }.get(outcome["status"], "failed")
-    return StepResult(step_id=step.id, status=status, detail=outcome.get("evidence", ""))
+
+    extracted: dict[str, Any] = {}
+    if step.kind == StepKind.EXTRACT and status == "succeeded":
+        var_name = step.details.get("variable_name", "value")
+        extracted = {var_name: outcome.get("evidence", "")}
+
+    return StepResult(step_id=step.id, status=status, detail=outcome.get("evidence", ""),
+                      extracted=extracted)
 
 
 def _finish(

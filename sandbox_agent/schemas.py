@@ -9,7 +9,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class StepKind(str, Enum):
@@ -38,6 +38,11 @@ class Credential(BaseModel):
 
 
 class Plan(BaseModel):
+    # Backend serialises many extra fields (status, version, created_at, etc.)
+    # that this schema doesn't need. Explicitly ignore them so the contract is
+    # clear and immune to Pydantic default changes.
+    model_config = ConfigDict(extra="ignore")
+
     id: str
     goal: str
     summary: str | None = None
@@ -54,6 +59,8 @@ class ExecutionMode(str, Enum):
 
 class RunRequest(BaseModel):
     """HTTP body for POST /run."""
+    model_config = ConfigDict(extra="ignore")
+
     plan: Plan
     initial_url: str | None = Field(
         None,
@@ -71,6 +78,7 @@ class StepResult(BaseModel):
     step_id: str
     status: Literal["succeeded", "failed", "skipped", "paused"]
     detail: str = ""
+    extracted: dict[str, Any] = Field(default_factory=dict)
 
 
 class RunResponse(BaseModel):

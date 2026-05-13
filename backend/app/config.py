@@ -38,6 +38,10 @@ class Settings(BaseSettings):
     sandbox_image: str = "agent-sandbox:latest"
     sandbox_default_max_steps: int = 50
     sandbox_default_max_seconds: int = 600
+    # Dev shortcut: set to the absolute path of sandbox_agent/ on the host to
+    # mount it live into containers. Sandbox code changes take effect instantly
+    # without a docker build. Leave unset (default) for normal operation.
+    sandbox_dev_mount: str | None = None
 
     # ----- Repository -----
     repo_backend: Literal["json", "postgres"] = "json"

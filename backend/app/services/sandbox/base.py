@@ -52,6 +52,9 @@ class SpawnConfig:
     memory_mb: int = 2048
     shm_size_mb: int = 2048   # Chromium needs lots of /dev/shm
     timeout_seconds: int = 600
+    # Dev only: mount a host path over /opt/sandbox_agent so sandbox code
+    # changes are picked up without rebuilding the image.
+    dev_mount: str | None = None
 
 
 class SandboxRunner(ABC):

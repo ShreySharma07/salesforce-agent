@@ -53,6 +53,8 @@ class LocalDockerRunner(SandboxRunner):
         ]
         for key, value in config.env.items():
             cmd += ["-e", f"{key}={value}"]
+        if config.dev_mount:
+            cmd += ["-v", f"{config.dev_mount}:/opt/sandbox_agent"]
         cmd.append(config.image)
 
         # Log the exact command we're running so we can replicate it manually
@@ -138,7 +140,10 @@ class LocalDockerRunner(SandboxRunner):
         # so the sandbox can complete its own bookkeeping.
         async with httpx.AsyncClient(timeout=max_seconds + 30) as client:
             r = await client.post(f"{handle.api_url}/run", json=body)
-            r.raise_for_status()
+            if r.status_code >= 400:
+                raise RuntimeError(
+                    f"sandbox /run returned {r.status_code}: {r.text[:2000]}"
+                )
             return r.json()
 
     async def teardown(self, handle: SandboxHandle) -> None:

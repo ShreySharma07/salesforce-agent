@@ -14,7 +14,7 @@ one continuous flow.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 from pydantic import BaseModel
@@ -127,6 +127,7 @@ async def _execute_automation_in_sandbox(run_id: str) -> None:
         config = SpawnConfig(
             image=settings.sandbox_image,
             env=settings.llm_env_for_sandbox(),
+            dev_mount=settings.sandbox_dev_mount,
         )
         handle = await runner.spawn(config)
 
@@ -157,17 +158,29 @@ async def _execute_automation_in_sandbox(run_id: str) -> None:
         )
 
         # Translate sandbox response into our Run model
-        run.status = (
-            RunStatus.COMPLETED if result.get("status") == "completed"
-            else RunStatus.FAILED
+        if result.get("status") == "completed":
+            has_failures = any(
+                sr.get("status") != "succeeded"
+                for sr in result.get("step_results", [])
+            )
+            run.status = (
+                RunStatus.COMPLETED_WITH_FAILURES if has_failures
+                else RunStatus.COMPLETED
+            )
+        else:
+            run.status = RunStatus.FAILED
+        run_start = run.started_at or datetime.utcnow()
+        elapsed_per_step = (
+            (datetime.utcnow() - run_start) / max(len(result.get("step_results", [])), 1)
         )
-        for sr in result.get("step_results", []):
+        for i, sr in enumerate(result.get("step_results", [])):
             run.step_executions.append(StepExecution(
                 step_id=sr["step_id"],
-                started_at=datetime.utcnow(),
-                finished_at=datetime.utcnow(),
+                started_at=run_start + elapsed_per_step * i,
+                finished_at=run_start + elapsed_per_step * (i + 1),
                 status="succeeded" if sr["status"] == "succeeded" else "failed",
                 error=sr.get("detail") if sr["status"] == "failed" else None,
+                extracted_variables=sr.get("extracted", {}),
             ))
         run.summary = (
             f"{sum(1 for s in run.step_executions if s.status == 'succeeded')} of "
@@ -179,7 +192,7 @@ async def _execute_automation_in_sandbox(run_id: str) -> None:
 
         # Bump per-automation counters
         auto.total_runs += 1
-        if run.status == RunStatus.COMPLETED:
+        if run.status in (RunStatus.COMPLETED, RunStatus.COMPLETED_WITH_FAILURES):
             auto.successful_runs += 1
         auto.last_run_at = run.finished_at
         await repo.save_automation(auto)
