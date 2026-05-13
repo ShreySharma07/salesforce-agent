@@ -1,67 +1,113 @@
 """
 Backend FastAPI app. Run with:
 
-    uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload
-
-Or via:
-
     python -m app.main
 
-The backend's port is 8001 by default; sandbox containers use 8000
-(don't collide). The frontend dashboard (Phase 1c) will hit this server.
+The backend's port is 8001 by default; sandbox containers use 8000.
+
+Startup:
+  1. Run pending Alembic migrations (if AUTO_MIGRATE=true)
+  2. Bootstrap default user if none exists
+  3. Verify sandbox image is present (warn loudly if not)
 """
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 from contextlib import asynccontextmanager
+from pathlib import Path
 
+from alembic import command
+from alembic.config import Config as AlembicConfig
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import automations, plans, runs
+from app.api import automations, credentials, oauth, plans, runs
 from app.config import get_settings
+from app.db.base import close_engine, get_sessionmaker
+from app.db.models import User
 
 
-logging.basicConfig(level=logging.INFO,
-                    format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 log = logging.getLogger("backend")
 
 
-def _check_sandbox_image(image: str) -> None:
-    """Warn loudly at startup if the sandbox image is missing so the
-    developer knows before they try to run a plan and hit a confusing
-    docker error 10 seconds into provisioning."""
+def _run_migrations() -> None:
+    settings = get_settings()
+    log.info("Running database migrations")
+    cfg = AlembicConfig(str(Path(__file__).parent.parent / "alembic.ini"))
+    cfg.set_main_option("sqlalchemy.url", settings.database_url)
+    cfg.set_main_option("script_location", str(Path(__file__).parent / "db" / "migrations"))
+    # Ensure the storage dir exists for SQLite
+    storage_root = Path(settings.local_storage_root)
+    storage_root.mkdir(parents=True, exist_ok=True)
+    command.upgrade(cfg, "head")
+    log.info("Migrations up to date")
+
+
+async def _ensure_default_user() -> None:
+    settings = get_settings()
+    async with get_sessionmaker()() as session:
+        existing = await session.get(User, settings.default_user_id)
+        if existing is None:
+            session.add(User(
+                id=settings.default_user_id,
+                email=None, name="Local Dev User", is_active=True,
+            ))
+            await session.commit()
+            log.info("Created default user: %s", settings.default_user_id)
+
+
+def _check_sandbox_image() -> None:
+    settings = get_settings()
+    if settings.sandbox_runner != "local_docker":
+        return
     result = subprocess.run(
-        ["docker", "image", "inspect", image],
+        ["docker", "image", "inspect", settings.sandbox_image],
         capture_output=True,
     )
     if result.returncode != 0:
         log.warning(
-            "\n"
-            "  ╔══════════════════════════════════════════════════════╗\n"
-            "  ║  WARNING: sandbox image %r not found locally.  ║\n"
-            "  ║  Plans will fail at runtime until you build it.      ║\n"
-            "  ║  Run:                                                 ║\n"
-            "  ║    docker build -t %s -f sandbox/Dockerfile . ║\n"
-            "  ╚══════════════════════════════════════════════════════╝",
-            image, image,
+            "Sandbox image %r not found locally. Build with: "
+            "docker build -t %s -f sandbox/Dockerfile .",
+            settings.sandbox_image, settings.sandbox_image,
         )
 
 
-def create_app() -> FastAPI:
+def _check_vault_key() -> None:
     settings = get_settings()
+    if not settings.vault_encryption_key:
+        log.warning(
+            "VAULT_ENCRYPTION_KEY not set. Credential operations will fail. "
+            "Generate one with: python -c "
+            "\"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+        )
 
-    @asynccontextmanager
-    async def lifespan(_app: FastAPI):
-        if settings.sandbox_runner == "local_docker":
-            _check_sandbox_image(settings.sandbox_image)
-        yield
 
-    app = FastAPI(title="AI Agent Platform Backend", version="0.1.0",
-                  lifespan=lifespan)
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    settings = get_settings()
+    _check_vault_key()
+    if settings.auto_migrate:
+        _run_migrations()
+    await _ensure_default_user()
+    _check_sandbox_image()
+    log.info(
+        "Backend up. llm=%s sandbox=%s db=%s",
+        settings.llm_provider, settings.sandbox_runner,
+        "sqlite" if "sqlite" in settings.database_url else "postgres",
+    )
+    yield
+    await close_engine()
 
-    # CORS - permissive for dev. Tighten for prod.
+
+def create_app() -> FastAPI:
+    app = FastAPI(title="AI Agent Platform Backend", version="0.2.0", lifespan=lifespan)
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://localhost:3000", "http://localhost:5173"],
@@ -73,20 +119,19 @@ def create_app() -> FastAPI:
     app.include_router(plans.router)
     app.include_router(automations.router)
     app.include_router(runs.router)
+    app.include_router(credentials.router)
+    app.include_router(oauth.router)
 
     @app.get("/health")
     def health() -> dict:
+        s = get_settings()
         return {
             "status": "ok",
-            "llm_provider": settings.llm_provider,
-            "sandbox_runner": settings.sandbox_runner,
-            "repo_backend": settings.repo_backend,
+            "llm_provider": s.llm_provider,
+            "sandbox_runner": s.sandbox_runner,
+            "db": "sqlite" if "sqlite" in s.database_url else "postgres",
+            "vault_configured": bool(s.vault_encryption_key),
         }
-
-    log.info(
-        "Backend up. llm=%s sandbox=%s repo=%s",
-        settings.llm_provider, settings.sandbox_runner, settings.repo_backend,
-    )
     return app
 
 
@@ -94,15 +139,13 @@ app = create_app()
 
 
 if __name__ == "__main__":
-    import os
     import uvicorn
     s = get_settings()
     uvicorn.run(
         "app.main:app",
         host=s.backend_host,
         port=s.backend_port,
-        # reload=True breaks long-running BackgroundTasks (sandbox runs).
-        # Set BACKEND_RELOAD=1 only when you're actively editing code.
         reload=os.getenv("BACKEND_RELOAD") == "1",
-        reload_excludes=[".local_storage/*", "*.json"] if os.getenv("BACKEND_RELOAD") == "1" else None,
+        reload_excludes=[".local_storage/*", "*.json", "*.db", "*.db-journal"]
+        if os.getenv("BACKEND_RELOAD") == "1" else None,
     )

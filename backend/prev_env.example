@@ -1,0 +1,17 @@
+LLM_PROVIDER=mock
+LLM_MODEL=mock-model
+
+# When billing arrives:
+# LLM_PROVIDER=gemini
+# LLM_MODEL=gemini-3-flash-preview
+# GEMINI_API_KEY=your_key_here
+
+LOCAL_STORAGE_ROOT=./.local_storage
+DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:5432/agent
+
+DEFAULT_MAX_MODEL_CALLS_PER_RUN=50
+DEFAULT_MAX_USD_PER_RUN=2.00
+DEFAULT_MAX_WALL_CLOCK_SECONDS=600
+
+KEYFRAME_EXTRACTION_FPS=0.5
+KEYFRAME_MAX_COUNT=120

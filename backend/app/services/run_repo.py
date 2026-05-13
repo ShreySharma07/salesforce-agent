@@ -1,43 +1,29 @@
 """
-Repository layer for Plans, Automations, Runs.
+SQLAlchemy repository for Plans, Automations, Runs.
 
-Two implementations:
-  - JsonFileRepo: each record is a JSON file under .local_storage/{kind}/{id}.json.
-                  zero setup, perfect for dev and the first 100 records.
-  - PostgresRepo: same interface, real DB.  Stub today.
-
-Switch via REPO_BACKEND env var. Concurrency-safe writes via temp file +
-atomic rename. Querying is simple linear scan (fine for dev volumes).
-
-When you flip to Postgres, no other code changes — same .save(), .get(),
-.list_by_user() calls.
+This is the SINGLE implementation of the Repository interface.
+Pydantic models are the API contract; ORM models are persistence.
+Conversion happens at this boundary.
 """
 from __future__ import annotations
 
-import json
-import os
-import tempfile
 from abc import ABC, abstractmethod
 from datetime import datetime
-from pathlib import Path
-from typing import TypeVar
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
+from app.db.base import get_sessionmaker
+from app.db.models import Automation as AutomationOrm
+from app.db.models import Plan as PlanOrm
+from app.db.models import Run as RunOrm
 from app.schemas.automation import Automation
 from app.schemas.plan import Plan
 from app.schemas.run import Run
 
-T = TypeVar("T", Plan, Run, Automation)
-
-
-# ---------------------------------------------------------------------------
-# Interface
-# ---------------------------------------------------------------------------
 
 class Repository(ABC):
-    """Base interface every backend implements. Generic over record type
-    to keep call sites tidy."""
-
     @abstractmethod
     async def save_plan(self, plan: Plan) -> None: ...
     @abstractmethod
@@ -60,145 +46,149 @@ class Repository(ABC):
     async def list_runs(self, automation_id: str | None = None) -> list[Run]: ...
 
 
-# ---------------------------------------------------------------------------
-# JSON file implementation
-# ---------------------------------------------------------------------------
-
-def _atomic_write(path: Path, data: str) -> None:
-    """Write atomically: write to temp file in same dir, then rename.
-    Avoids corruption if the process dies mid-write."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".tmp_", suffix=".json")
-    try:
-        with os.fdopen(fd, "w") as f:
-            f.write(data)
-        os.replace(tmp, path)
-    except Exception:
-        Path(tmp).unlink(missing_ok=True)
-        raise
+def _json(obj) -> dict:
+    return obj.model_dump(mode="json")
 
 
-def _json_dumps(obj) -> str:
-    """Pydantic v2 .model_dump_json() doesn't take indent; this does."""
-    return json.dumps(json.loads(obj.model_dump_json()), indent=2, default=str)
+def _enum_str(value) -> str:
+    return value.value if hasattr(value, "value") else str(value)
 
 
-class JsonFileRepo(Repository):
-    def __init__(self, root: Path):
-        self.root = root
-        self.plans_dir = root / "plans"
-        self.runs_dir = root / "runs"
-        self.autos_dir = root / "automations"
-        for d in (self.plans_dir, self.runs_dir, self.autos_dir):
-            d.mkdir(parents=True, exist_ok=True)
-
-    # ---- Plans ----------------------------------------------------------
+class SqlRepo(Repository):
     async def save_plan(self, plan: Plan) -> None:
-        _atomic_write(self.plans_dir / f"{plan.id}.json", _json_dumps(plan))
+        async with get_sessionmaker()() as session:
+            existing = await session.get(PlanOrm, plan.id)
+            payload = _json(plan)
+            if existing:
+                existing.payload = payload
+                existing.status = _enum_str(plan.status)
+                existing.version = plan.version
+                existing.source_video_id = plan.source_video_id
+                existing.updated_at = datetime.utcnow()
+            else:
+                session.add(PlanOrm(
+                    id=plan.id,
+                    user_id=get_settings().default_user_id,
+                    payload=payload,
+                    status=_enum_str(plan.status),
+                    version=plan.version,
+                    source_video_id=plan.source_video_id,
+                ))
+            await session.commit()
 
     async def get_plan(self, plan_id: str) -> Plan | None:
-        path = self.plans_dir / f"{plan_id}.json"
-        if not path.exists():
-            return None
-        return Plan.model_validate_json(path.read_text())
+        async with get_sessionmaker()() as session:
+            row = await session.get(PlanOrm, plan_id)
+            if row is None:
+                return None
+            return Plan.model_validate(row.payload)
 
     async def list_plans(self) -> list[Plan]:
-        return sorted(
-            (Plan.model_validate_json(p.read_text()) for p in self.plans_dir.glob("*.json")),
-            key=lambda p: p.created_at,
-            reverse=True,
-        )
+        async with get_sessionmaker()() as session:
+            result = await session.execute(
+                select(PlanOrm).order_by(PlanOrm.created_at.desc())
+            )
+            return [Plan.model_validate(r.payload) for r in result.scalars().all()]
 
-    # ---- Automations ----------------------------------------------------
     async def save_automation(self, auto: Automation) -> None:
-        _atomic_write(self.autos_dir / f"{auto.id}.json", _json_dumps(auto))
+        async with get_sessionmaker()() as session:
+            existing = await session.get(AutomationOrm, auto.id)
+            payload = _json(auto)
+            if existing:
+                existing.payload = payload
+                existing.name = auto.name
+                existing.status = _enum_str(auto.status)
+                existing.plan_id = auto.plan_id
+                existing.total_runs = auto.total_runs
+                existing.successful_runs = auto.successful_runs
+                existing.last_run_at = auto.last_run_at
+                existing.updated_at = datetime.utcnow()
+            else:
+                session.add(AutomationOrm(
+                    id=auto.id,
+                    user_id=auto.user_id or get_settings().default_user_id,
+                    plan_id=auto.plan_id,
+                    name=auto.name,
+                    status=_enum_str(auto.status),
+                    payload=payload,
+                    total_runs=auto.total_runs,
+                    successful_runs=auto.successful_runs,
+                    last_run_at=auto.last_run_at,
+                ))
+            await session.commit()
 
     async def get_automation(self, auto_id: str) -> Automation | None:
-        path = self.autos_dir / f"{auto_id}.json"
-        if not path.exists():
-            return None
-        return Automation.model_validate_json(path.read_text())
+        async with get_sessionmaker()() as session:
+            row = await session.get(AutomationOrm, auto_id)
+            if row is None:
+                return None
+            return Automation.model_validate(row.payload)
 
     async def list_automations(self) -> list[Automation]:
-        return sorted(
-            (Automation.model_validate_json(p.read_text()) for p in self.autos_dir.glob("*.json")),
-            key=lambda a: a.created_at,
-            reverse=True,
-        )
+        async with get_sessionmaker()() as session:
+            result = await session.execute(
+                select(AutomationOrm).order_by(AutomationOrm.created_at.desc())
+            )
+            return [Automation.model_validate(r.payload) for r in result.scalars().all()]
 
-    # ---- Runs -----------------------------------------------------------
     async def save_run(self, run: Run) -> None:
-        _atomic_write(self.runs_dir / f"{run.id}.json", _json_dumps(run))
+        async with get_sessionmaker()() as session:
+            existing = await session.get(RunOrm, run.id)
+            payload = _json(run)
+            cost_usd = float(run.cost.cost_usd) if run.cost else 0.0
+            llm_calls = int(run.cost.llm_calls) if run.cost else 0
+            if existing:
+                existing.payload = payload
+                existing.status = _enum_str(run.status)
+                existing.sandbox_id = run.sandbox_id
+                existing.live_view_url = run.live_view_url
+                existing.started_at = run.started_at
+                existing.finished_at = run.finished_at
+                existing.error = run.error
+                existing.summary = run.summary
+                existing.cost_usd = cost_usd
+                existing.llm_calls = llm_calls
+            else:
+                session.add(RunOrm(
+                    id=run.id,
+                    automation_id=run.automation_id,
+                    plan_version=run.plan_version,
+                    status=_enum_str(run.status),
+                    triggered_by=_enum_str(run.triggered_by),
+                    triggered_by_user=run.triggered_by_user,
+                    sandbox_id=run.sandbox_id,
+                    live_view_url=run.live_view_url,
+                    started_at=run.started_at,
+                    finished_at=run.finished_at,
+                    error=run.error,
+                    summary=run.summary,
+                    cost_usd=cost_usd,
+                    llm_calls=llm_calls,
+                    payload=payload,
+                ))
+            await session.commit()
 
     async def get_run(self, run_id: str) -> Run | None:
-        path = self.runs_dir / f"{run_id}.json"
-        if not path.exists():
-            return None
-        return Run.model_validate_json(path.read_text())
+        async with get_sessionmaker()() as session:
+            row = await session.get(RunOrm, run_id)
+            if row is None:
+                return None
+            return Run.model_validate(row.payload)
 
     async def list_runs(self, automation_id: str | None = None) -> list[Run]:
-        runs = (Run.model_validate_json(p.read_text()) for p in self.runs_dir.glob("*.json"))
-        if automation_id:
-            runs = (r for r in runs if r.automation_id == automation_id)
-        return sorted(
-            runs,
-            key=lambda r: r.started_at or datetime.min,
-            reverse=True,
-        )
+        async with get_sessionmaker()() as session:
+            stmt = select(RunOrm).order_by(RunOrm.created_at.desc())
+            if automation_id:
+                stmt = stmt.where(RunOrm.automation_id == automation_id)
+            result = await session.execute(stmt)
+            return [Run.model_validate(r.payload) for r in result.scalars().all()]
 
 
-# ---------------------------------------------------------------------------
-# Postgres stub - reference implementation in comments
-# ---------------------------------------------------------------------------
+_repo: SqlRepo | None = None
 
-class PostgresRepo(Repository):
-    """STUB. Implement when you have >100 saved records or multiple users.
-
-    Sketch (using SQLAlchemy 2.0 async):
-
-        async def save_plan(self, plan):
-            async with self._sessionmaker() as session:
-                stmt = pg_insert(plans_table).values(
-                    id=plan.id, data=plan.model_dump_json(),
-                ).on_conflict_do_update(
-                    index_elements=['id'],
-                    set_={'data': plan.model_dump_json(), 'updated_at': func.now()},
-                )
-                await session.execute(stmt)
-                await session.commit()
-
-    Migration plan when activating:
-        1. Run `alembic upgrade head` to create tables
-        2. Run `python -m scripts.migrate_json_to_postgres` to copy existing JSON files
-        3. Set REPO_BACKEND=postgres in .env
-        4. Restart backend
-    """
-    def __init__(self, dsn: str):
-        raise NotImplementedError(
-            "PostgresRepo is a stub. Set REPO_BACKEND=json for now. "
-            "See app/services/run_repo.py docstring for the migration recipe."
-        )
-
-    async def save_plan(self, plan): ...
-    async def get_plan(self, plan_id): ...
-    async def list_plans(self): ...
-    async def save_automation(self, auto): ...
-    async def get_automation(self, auto_id): ...
-    async def list_automations(self): ...
-    async def save_run(self, run): ...
-    async def get_run(self, run_id): ...
-    async def list_runs(self, automation_id=None): ...
-
-
-# ---------------------------------------------------------------------------
-# Factory
-# ---------------------------------------------------------------------------
 
 def get_repository() -> Repository:
-    settings = get_settings()
-    backend = settings.repo_backend.lower()
-    if backend == "json":
-        return JsonFileRepo(Path(settings.local_storage_root))
-    if backend == "postgres":
-        return PostgresRepo(settings.database_url)
-    raise ValueError(f"Unknown REPO_BACKEND={backend!r}")
+    global _repo
+    if _repo is None:
+        _repo = SqlRepo()
+    return _repo
