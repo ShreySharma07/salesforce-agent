@@ -1,21 +1,28 @@
 """
-Backend configuration. All settings come from env vars (12-factor style).
+Backend configuration. All settings from env vars (12-factor style).
 
-Critical knobs:
-  LLM_PROVIDER       mock | gemini | anthropic | openai
-  LLM_MODEL          model id (provider-specific)
-  GEMINI_API_KEY     etc — backend reads these once, passes to sandboxes
-  SANDBOX_RUNNER     local_docker | modal | fargate
-  REPO_BACKEND       json | postgres
+CRITICAL env vars:
+  DATABASE_URL              SQLite path (dev) or Postgres URI (prod)
+  VAULT_ENCRYPTION_KEY      Fernet key for secret encryption (32 url-safe base64 bytes)
+  PUBLIC_BACKEND_BASE_URL   How the OUTSIDE WORLD reaches this backend.
+                            For OAuth callbacks to work, this must be a real URL
+                            the OAuth provider can hit (e.g. https://yourapp.com
+                            in prod, or http://localhost:8001 for local dev).
 
-User never has to type API keys for individual runs - backend handles it.
+Per-provider OAuth credentials:
+  SALESFORCE_CLIENT_ID, SALESFORCE_CLIENT_SECRET
+  GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET
+  SLACK_CLIENT_ID, SLACK_CLIENT_SECRET
+
+Leave provider keys empty until you register your app with the provider —
+the OAuth endpoint will return a clear error if asked to use an
+unconfigured provider.
 """
 from __future__ import annotations
 
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -27,8 +34,8 @@ class Settings(BaseSettings):
     )
 
     # ----- LLM provider -----
-    llm_provider: Literal["mock", "gemini", "anthropic", "openai"] = "mock"
-    llm_model: str = "mock-model"
+    llm_provider: Literal["mock", "gemini", "anthropic", "openai"] = "gemini"
+    llm_model: str = "gemini-2.5-flash"
     gemini_api_key: str | None = None
     anthropic_api_key: str | None = None
     openai_api_key: str | None = None
@@ -38,44 +45,53 @@ class Settings(BaseSettings):
     sandbox_image: str = "agent-sandbox:latest"
     sandbox_default_max_steps: int = 50
     sandbox_default_max_seconds: int = 600
-    # Dev shortcut: set to the absolute path of sandbox_agent/ on the host to
-    # mount it live into containers. Sandbox code changes take effect instantly
-    # without a docker build. Leave unset (default) for normal operation.
+
+    # Optional: live-mount sandbox_agent/ for fast iteration without rebuilding
     sandbox_dev_mount: str | None = None
 
-    # ----- Repository -----
-    repo_backend: Literal["json", "postgres"] = "json"
-    database_url: str = "postgresql+psycopg://postgres:postgres@localhost:5432/agent"
+    # ----- Database -----
+    database_url: str = "sqlite+aiosqlite:///./.local_storage/dev.db"
+    auto_migrate: bool = True
 
-    # ----- Storage -----
+    # ----- Vault / secrets -----
+    # Generate with: openssl rand -base64 32 | sed 's/+/-/g; s/\//_/g; s/=//g'
+    # (Fernet wants url-safe base64 of 32 raw bytes.)
+    vault_encryption_key: str | None = None
+
+    # ----- OAuth -----
+    public_backend_base_url: str = "http://localhost:8001"
+    # Salesforce
+    salesforce_client_id: str | None = None
+    salesforce_client_secret: str | None = None
+    salesforce_auth_url: str = "https://login.salesforce.com"  # use test.salesforce.com for sandboxes
+    # Google
+    google_client_id: str | None = None
+    google_client_secret: str | None = None
+    # Slack
+    slack_client_id: str | None = None
+    slack_client_secret: str | None = None
+
+    # ----- Storage / video processing -----
     local_storage_root: str = "./.local_storage"
-    s3_bucket_videos: str = "local-videos"
-    s3_bucket_traces: str = "local-traces"
-
-    # ----- Budget defaults (per run) -----
-    default_max_model_calls_per_run: int = 50
-    default_max_usd_per_run: float = 2.00
-    default_max_wall_clock_seconds: int = 600
-
-    # ----- Video processing -----
     keyframe_extraction_fps: float = 0.5
     keyframe_max_count: int = 120
 
     # ----- Backend HTTP server -----
     backend_host: str = "0.0.0.0"
-    backend_port: int = 8001  # 8000 reserved for sandbox
+    backend_port: int = 8001
+
+    # ----- Default user (single-user mode) -----
+    default_user_id: str = "user_local"
+
+    # ----- Budget defaults -----
+    default_max_model_calls_per_run: int = 50
+    default_max_usd_per_run: float = 2.00
 
     def llm_env_for_sandbox(self) -> dict[str, str]:
-        """Build the env vars to pass into a sandbox container so it can
-        make LLM calls. Resolves provider + key from backend's own env.
-        Sandbox doesn't need to know which provider - it picks based on
-        the LLM_PROVIDER value we forward."""
         env: dict[str, str] = {
             "LLM_PROVIDER": self.llm_provider,
             "LLM_MODEL": self.llm_model,
         }
-        # Forward whichever API key is relevant. Provider-specific keys
-        # are kept under their canonical names so sandbox code is agnostic.
         if self.gemini_api_key:
             env["GEMINI_API_KEY"] = self.gemini_api_key
         if self.anthropic_api_key:
@@ -83,6 +99,9 @@ class Settings(BaseSettings):
         if self.openai_api_key:
             env["OPENAI_API_KEY"] = self.openai_api_key
         return env
+
+    def oauth_redirect_uri(self, provider: str) -> str:
+        return f"{self.public_backend_base_url.rstrip('/')}/oauth/{provider}/callback"
 
 
 @lru_cache

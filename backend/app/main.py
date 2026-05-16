@@ -12,14 +12,14 @@ Startup:
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import subprocess
+import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from alembic import command
-from alembic.config import Config as AlembicConfig
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -36,18 +36,29 @@ logging.basicConfig(
 log = logging.getLogger("backend")
 
 
-def _run_migrations() -> None:
+async def _run_migrations() -> None:
+    """Run Alembic migrations in a subprocess to eliminate the SQLAlchemy 2 +
+    aiosqlite connection-state deadlock that occurs when alembic.command.upgrade()
+    runs inside the same process that later opens async sessions."""
     settings = get_settings()
-    log.info("Running database migrations")
-    cfg = AlembicConfig(str(Path(__file__).parent.parent / "alembic.ini"))
-    cfg.set_main_option("sqlalchemy.url", settings.database_url)
-    cfg.set_main_option("script_location", str(Path(__file__).parent / "db" / "migrations"))
-    # Ensure the storage dir exists for SQLite
+    log.info("Running database migrations (in subprocess)")
     storage_root = Path(settings.local_storage_root)
     storage_root.mkdir(parents=True, exist_ok=True)
-    command.upgrade(cfg, "head")
-    log.info("Migrations up to date")
 
+    backend_dir = Path(__file__).parent.parent
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable, "-m", "alembic", "upgrade", "head",
+        cwd=backend_dir,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    stdout, _ = await proc.communicate()
+    if stdout:
+        for line in stdout.decode().splitlines():
+            log.info("[alembic] %s", line)
+    if proc.returncode != 0:
+        raise RuntimeError(f"Alembic migrations failed (exit {proc.returncode})")
+    log.info("Migrations up to date")
 
 async def _ensure_default_user() -> None:
     settings = get_settings()
@@ -93,7 +104,7 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     _check_vault_key()
     if settings.auto_migrate:
-        _run_migrations()
+       await _run_migrations()
     await _ensure_default_user()
     _check_sandbox_image()
     log.info(

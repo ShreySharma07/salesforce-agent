@@ -1,9 +1,8 @@
-"""initial schema - users, credentials, oauth_states, plans, automations, runs
+"""initial schema
 
 Revision ID: 0001_initial
 Revises:
 Create Date: 2026-05-12 00:00:00
-
 """
 from typing import Sequence, Union
 
@@ -39,12 +38,10 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(), server_default=sa.func.now(), nullable=False),
         sa.Column("updated_at", sa.DateTime(), server_default=sa.func.now(), nullable=False),
         sa.Column("last_used_at", sa.DateTime(), nullable=True),
+        sa.UniqueConstraint("user_id", "provider", name="uq_credentials_user_provider"),
     )
     op.create_index("ix_credentials_user_id", "credentials", ["user_id"])
     op.create_index("ix_credentials_provider", "credentials", ["provider"])
-    op.create_unique_constraint(
-        "uq_credentials_user_provider", "credentials", ["user_id", "provider"]
-    )
 
     op.create_table(
         "oauth_states",

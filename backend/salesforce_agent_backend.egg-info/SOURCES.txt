@@ -8,6 +8,8 @@ app/agent/plan_generator.py
 app/agent/video_processor.py
 app/api/__init__.py
 app/api/automations.py
+app/api/credentials.py
+app/api/oauth.py
 app/api/plans.py
 app/api/runs.py
 app/core/__init__.py
@@ -19,6 +21,10 @@ app/core/llm/factory.py
 app/core/llm/gemini.py
 app/core/llm/mock.py
 app/db/__init__.py
+app/db/base.py
+app/db/models.py
+app/db/migrations/env.py
+app/db/migrations/versions/0001_initial.py
 app/schemas/__init__.py
 app/schemas/automation.py
 app/schemas/plan.py
@@ -26,6 +32,10 @@ app/schemas/run.py
 app/services/__init__.py
 app/services/run_repo.py
 app/services/storage.py
+app/services/vault.py
+app/services/oauth/base.py
+app/services/oauth/providers.py
+app/services/oauth/refresh.py
 app/services/sandbox/__init__.py
 app/services/sandbox/base.py
 app/services/sandbox/factory.py
