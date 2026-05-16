@@ -23,7 +23,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import automations, credentials, oauth, plans, runs
+from app.api import automations, credentials, mcp, oauth, plans, runs
 from app.config import get_settings
 from app.db.base import close_engine, get_sessionmaker
 from app.db.models import User
@@ -132,6 +132,7 @@ def create_app() -> FastAPI:
     app.include_router(runs.router)
     app.include_router(credentials.router)
     app.include_router(oauth.router)
+    app.include_router(mcp.router)
 
     @app.get("/health")
     def health() -> dict:

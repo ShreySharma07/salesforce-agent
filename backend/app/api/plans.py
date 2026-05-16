@@ -20,9 +20,23 @@ from app.services.run_repo import get_repository
 router = APIRouter(prefix="/plans", tags=["plans"])
 
 
+class UpsertPlanResponse(BaseModel):
+    plan: Plan
+    created: bool
+
+
 @router.get("", response_model=list[Plan])
 async def list_plans():
     return await get_repository().list_plans()
+
+
+@router.post("", response_model=UpsertPlanResponse)
+async def upsert_plan(plan: Plan):
+    """Upload a plan. Creates if new, updates if existing."""
+    repo = get_repository()
+    existing = await repo.get_plan(plan.id)
+    await repo.save_plan(plan)
+    return UpsertPlanResponse(plan=plan, created=existing is None)
 
 
 @router.get("/{plan_id}", response_model=Plan)

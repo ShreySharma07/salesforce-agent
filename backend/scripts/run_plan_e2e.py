@@ -21,7 +21,6 @@ import argparse
 import asyncio
 import json
 import sys
-import time
 from pathlib import Path
 
 import httpx
@@ -32,18 +31,15 @@ async def run_e2e(plan_path: Path, backend: str, name: str, watch: bool, auto_op
     plan_id = plan_data["id"]
 
     async with httpx.AsyncClient(base_url=backend, timeout=15) as client:
-        # Step 1: ensure plan exists. We don't have an upload endpoint yet,
-        # so we drop the file in the repo dir directly. (Phase 1c adds upload.)
-        # For now, the plan must already be in .local_storage/plans/<id>.json.
+        # Step 1: ensure plan exists in the backend DB; upload it if not.
         r = await client.get(f"/plans/{plan_id}")
         if r.status_code == 404:
-            print(
-                f"Plan {plan_id} not found in backend repo. "
-                f"Copy your plan JSON to backend/.local_storage/plans/{plan_id}.json first.",
-                file=sys.stderr,
-            )
-            return 1
-        r.raise_for_status()
+            print(f"  uploading plan {plan_id} to backend...")
+            upload = await client.post("/plans", json=plan_data)
+            upload.raise_for_status()
+            print(f"  ✓ uploaded plan {plan_id}")
+        else:
+            r.raise_for_status()
 
         # Step 2: approve it
         r = await client.post(f"/plans/{plan_id}/approve")

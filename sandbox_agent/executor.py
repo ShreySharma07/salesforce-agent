@@ -173,10 +173,42 @@ def _run_step(page: Page, llm: GeminiClient, step: Step) -> StepResult:
         return StepResult(step_id=step.id, status="paused",
                           detail=str(step.details.get("prompt", "human input requested")))
 
+    # if step.kind == StepKind.MCP_CALL:
+    #     import asyncio
+    #     from sandbox_agent.mcp_client import MCPClient, MCPClientError
+    #     server = step.details.get("server", "")
+    #     tool = step.details.get("tool", "")
+    #     args = step.details.get("args") or {}
+    #     variable_name = step.details.get("variable_name") or "result"
+    #     try:
+    #         result = asyncio.run(MCPClient().call(server, tool, args))
+    #         return StepResult(step_id=step.id, status="succeeded",
+    #                           extracted={variable_name: result})
+    #     except (MCPClientError, Exception) as e:
+    #         return StepResult(step_id=step.id, status="failed",
+    #                           error=str(e), extracted={})
+
     if step.kind == StepKind.MCP_CALL:
-        # Wired in the MCP-out phase. For now: skip with a notice.
-        return StepResult(step_id=step.id, status="skipped",
-                          detail="MCP execution not yet enabled in sandbox v1")
+        import traceback
+        server = step.details.get("server", "")
+        tool = step.details.get("tool", "")
+        args = step.details.get("args") or {}
+        variable_name = step.details.get("variable_name") or "result"
+        try:
+            from sandbox_agent.mcp_client import MCPClient
+            result = MCPClient().call(server, tool, args)
+            return StepResult(
+                step_id=step.id,
+                status="succeeded",
+                extracted={variable_name: result},
+            )
+        except Exception as e:
+            return StepResult(
+                step_id=step.id,
+                status="failed",
+                detail=f"MCP {server}/{tool} failed: {type(e).__name__}: {e}\n{traceback.format_exc()}",
+                extracted={},
+            )
 
     if step.kind == StepKind.NOTIFY:
         return StepResult(step_id=step.id, status="succeeded",

@@ -28,6 +28,22 @@ from app.services.sandbox import SpawnConfig, get_sandbox_runner
 router = APIRouter(prefix="/automations", tags=["automations"])
 
 
+def _backend_url_for_sandbox() -> str:
+    """Return the URL the sandbox should use to reach this backend.
+
+    When running local_docker and the configured public URL points at
+    localhost, the container can't resolve 'localhost' as the host machine —
+    use Docker's magic hostname instead.
+    """
+    settings = get_settings()
+    if (
+        settings.sandbox_runner == "local_docker"
+        and "localhost" in settings.public_backend_base_url
+    ):
+        return "http://host.docker.internal:8001"
+    return settings.public_backend_base_url
+
+
 class CreateAutomationBody(BaseModel):
     name: str
     plan_id: str
@@ -126,7 +142,11 @@ async def _execute_automation_in_sandbox(run_id: str) -> None:
         # Spawn sandbox with API keys auto-injected from backend env
         config = SpawnConfig(
             image=settings.sandbox_image,
-            env=settings.llm_env_for_sandbox(),
+            env={
+                **settings.llm_env_for_sandbox(),
+                "BACKEND_MCP_URL": _backend_url_for_sandbox(),
+                "RUN_ID": run.id,
+            },
             dev_mount=settings.sandbox_dev_mount,
         )
         handle = await runner.spawn(config)
