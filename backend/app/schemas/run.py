@@ -27,6 +27,22 @@ class RunTrigger(str, Enum):
     API = "api"
 
 
+class LoopIteration(BaseModel):
+    """One Reason->Act->Observe cycle from a UI step's ReAct loop.
+    Mirrors sandbox_agent.schemas.LoopIteration so traces survive the
+    sandbox -> backend boundary."""
+    iteration: int
+    thought: str = ""
+    action: str = ""
+    action_args: dict[str, Any] = Field(default_factory=dict)
+    observation: str = ""
+    screenshot_ref: str | None = None
+    latency_ms: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    error: str | None = None
+
+
 class StepExecution(BaseModel):
     step_id: str
     started_at: datetime
@@ -35,6 +51,9 @@ class StepExecution(BaseModel):
     attempts: int = 0
     error: str | None = None
     extracted_variables: dict[str, Any] = Field(default_factory=dict)
+    # Phase 2b: full ReAct trajectory for UI steps. Empty for non-UI steps.
+    trace: list[LoopIteration] = Field(default_factory=list)
+    pause_reason: str | None = None
 
 
 class HumanIntervention(BaseModel):
@@ -72,3 +91,4 @@ class Run(BaseModel):
     error: str | None = None
     recording_url: str | None = None
     audit_log_count: int = 0
+    mcp_token_hash: str | None = None

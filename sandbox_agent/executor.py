@@ -1,11 +1,13 @@
 """
-Plan executor. Walks a Plan top-to-bottom and dispatches each step to
-either browser_mode or computer_mode based on:
-  - Explicit details.execution_mode (if the plan author set one)
-  - Auto-routing rules (default)
-  - Fallback: if browser mode says 'stuck', retry the same step in computer mode
+Plan executor. Walks a Plan top-to-bottom and dispatches each step.
 
-This is the single orchestration point for executing plans inside the sandbox.
+Phase 2b:
+  - UI steps (ui_action / extract / decision / loop) run a ReAct loop in
+    browser_mode and the full trajectory is captured into StepResult.trace
+  - mcp_call steps keep their direct-dispatch path — no loop, no LLM cost
+  - per-step iteration + wall-time budgets are passed through from RunRequest
+  - browser-mode 'stuck' still falls back to computer mode
+  - browser-mode 'paused' (e.g. captcha) surfaces as a paused StepResult
 """
 from __future__ import annotations
 
@@ -13,13 +15,13 @@ import os
 import time
 from typing import Any
 
-from playwright.sync_api import Browser, Page, sync_playwright
+from playwright.sync_api import Page, sync_playwright
 
 from sandbox_agent import browser_mode, computer_mode
 from sandbox_agent.llm_client import GeminiClient
 from sandbox_agent.schemas import (
     ExecutionMode,
-    Plan,
+    LoopIteration,
     RunRequest,
     RunResponse,
     Step,
@@ -32,8 +34,6 @@ from sandbox_agent.schemas import (
 # Mode auto-routing
 # ---------------------------------------------------------------------------
 
-# Keywords in step description / intent that strongly suggest a desktop
-# (non-browser) operation. When matched, default to computer mode.
 _DESKTOP_KEYWORDS = {
     "notes app", "open application", "desktop", "spreadsheet",
     "libreoffice", "excel", "terminal", "slack desktop", "finder",
@@ -42,7 +42,6 @@ _DESKTOP_KEYWORDS = {
 
 
 def _route_step(step: Step) -> ExecutionMode:
-    """Decide which mode to use for this step. Plan-author overrides win."""
     explicit = step.details.get("execution_mode")
     if explicit:
         try:
@@ -66,14 +65,7 @@ def _route_step(step: Step) -> ExecutionMode:
     return ExecutionMode.BROWSER
 
 
-# ---------------------------------------------------------------------------
-# Step intent — what we hand to the per-step executor
-# ---------------------------------------------------------------------------
-
 def _step_intent(step: Step) -> str:
-    """Boil a Plan step down to one or two sentences for the per-step
-    executor. The executor is single-purpose and shouldn't have to
-    figure out the schema."""
     base = step.description
     intent = step.details.get("intent")
     target = step.details.get("target_description")
@@ -93,14 +85,10 @@ def _step_intent(step: Step) -> str:
 # ---------------------------------------------------------------------------
 
 def run_plan(req: RunRequest) -> RunResponse:
-    """Execute the plan against a fresh Chromium + the existing Xvfb desktop.
-    Returns a RunResponse summarizing per-step outcomes."""
     started = time.monotonic()
     llm = GeminiClient()
     step_results: list[StepResult] = []
 
-    # Launch Chromium ON the Xvfb display so noVNC viewers see it.
-    # We use sync_playwright directly so the agent can switch modes mid-plan.
     with sync_playwright() as pw:
         browser = pw.chromium.launch(
             headless=False,
@@ -136,7 +124,7 @@ def run_plan(req: RunRequest) -> RunResponse:
                 if time.monotonic() - started > req.max_seconds:
                     return _finish("aborted", step_results, page, "max_seconds reached", started)
 
-                result = _run_step(page, llm, step)
+                result = _run_step(page, llm, step, req)
                 step_results.append(result)
 
                 if result.status == "failed" and step.on_failure == "abort":
@@ -145,7 +133,7 @@ def run_plan(req: RunRequest) -> RunResponse:
 
                 if result.status == "paused":
                     return _finish("paused", step_results, page,
-                                   f"paused at step {step.id}", started)
+                                   f"paused at step {step.id}: {result.pause_reason or ''}", started)
 
             return _finish("completed", step_results, page, None, started)
 
@@ -156,39 +144,21 @@ def run_plan(req: RunRequest) -> RunResponse:
                 pass
 
 
-def _run_step(page: Page, llm: GeminiClient, step: Step) -> StepResult:
-    """Execute a single step. Tries the routed mode first; if browser mode
-    says 'stuck' (element not in DOM), retries in computer mode."""
-    # ---- Non-UI step kinds first ----
+def _run_step(page: Page, llm: GeminiClient, step: Step, req: RunRequest) -> StepResult:
+    """Execute a single step."""
+    # ---- Non-UI step kinds ----
     if step.kind == StepKind.WAIT:
         secs = float(step.details.get("seconds", 1))
         time.sleep(min(secs, 30))
-        return StepResult(step_id=step.id, status="succeeded",
-                          detail=f"waited {secs}s")
+        return StepResult(step_id=step.id, status="succeeded", detail=f"waited {secs}s")
 
     if step.kind == StepKind.HUMAN_INPUT:
-        # Phase 1 doesn't have a UX channel back to the user yet — we just
-        # pause and let the orchestrator pick this up. When the FastAPI/UX
-        # layer is wired, we'll send the prompt out and await a response.
         return StepResult(step_id=step.id, status="paused",
-                          detail=str(step.details.get("prompt", "human input requested")))
-
-    # if step.kind == StepKind.MCP_CALL:
-    #     import asyncio
-    #     from sandbox_agent.mcp_client import MCPClient, MCPClientError
-    #     server = step.details.get("server", "")
-    #     tool = step.details.get("tool", "")
-    #     args = step.details.get("args") or {}
-    #     variable_name = step.details.get("variable_name") or "result"
-    #     try:
-    #         result = asyncio.run(MCPClient().call(server, tool, args))
-    #         return StepResult(step_id=step.id, status="succeeded",
-    #                           extracted={variable_name: result})
-    #     except (MCPClientError, Exception) as e:
-    #         return StepResult(step_id=step.id, status="failed",
-    #                           error=str(e), extracted={})
+                          detail=str(step.details.get("prompt", "human input requested")),
+                          pause_reason="human_input")
 
     if step.kind == StepKind.MCP_CALL:
+        # Direct dispatch — no ReAct loop, no LLM cost. Phase 2a.1 path, unchanged.
         import traceback
         server = step.details.get("server", "")
         tool = step.details.get("tool", "")
@@ -227,31 +197,48 @@ def _run_step(page: Page, llm: GeminiClient, step: Step) -> StepResult:
             return StepResult(step_id=step.id, status="failed",
                               detail=f"navigate failed: {e}")
 
-    # ---- UI / extract / decision / loop  go through per-step LLM loop ----
+    # ---- UI / extract / decision / loop — ReAct loop ----
     intent = _step_intent(step)
     mode = _route_step(step)
+    trace: list[LoopIteration] = []
 
     if mode == ExecutionMode.BROWSER:
-        outcome = browser_mode.execute_step(page, llm, intent)
+        outcome = browser_mode.execute_step(
+            page, llm, intent,
+            max_iterations=req.max_iterations_per_step,
+            max_seconds=req.max_seconds_per_step,
+        )
+        trace = outcome.get("trace", [])
         if outcome["status"] == "stuck":
-            # Fallback: try computer mode for the same step
-            outcome = computer_mode.execute_step(llm, intent)
+            # Fallback: try computer mode for the same step.
+            cm_outcome = computer_mode.execute_step(llm, intent)
+            # computer_mode is pre-2b and returns no trace; keep the browser
+            # trace so the give-up reasoning is still visible.
+            outcome = cm_outcome
     else:
         outcome = computer_mode.execute_step(llm, intent)
 
-    status = {
+    status_map = {
         "succeeded": "succeeded",
-        "stuck": "failed",       # both modes ran out of options
+        "stuck": "failed",       # both modes exhausted
         "failed": "failed",
-    }.get(outcome["status"], "failed")
+        "paused": "paused",
+    }
+    status = status_map.get(outcome["status"], "failed")
 
     extracted: dict[str, Any] = {}
     if step.kind == StepKind.EXTRACT and status == "succeeded":
         var_name = step.details.get("variable_name", "value")
         extracted = {var_name: outcome.get("evidence", "")}
 
-    return StepResult(step_id=step.id, status=status, detail=outcome.get("evidence", ""),
-                      extracted=extracted)
+    return StepResult(
+        step_id=step.id,
+        status=status,  # type: ignore[arg-type]
+        detail=outcome.get("evidence", ""),
+        extracted=extracted,
+        trace=trace,
+        pause_reason=outcome.get("pause_reason"),
+    )
 
 
 def _finish(
@@ -268,7 +255,7 @@ def _finish(
     except Exception:
         pass
     return RunResponse(
-        status=status,                       # type: ignore[arg-type]
+        status=status,  # type: ignore[arg-type]
         step_results=step_results,
         final_url=final_url,
         error=error,

@@ -148,6 +148,8 @@ class SqlRepo(Repository):
                 existing.summary = run.summary
                 existing.cost_usd = cost_usd
                 existing.llm_calls = llm_calls
+                if run.mcp_token_hash is not None:
+                    existing.mcp_token_hash = run.mcp_token_hash
             else:
                 session.add(RunOrm(
                     id=run.id,
@@ -164,6 +166,7 @@ class SqlRepo(Repository):
                     summary=run.summary,
                     cost_usd=cost_usd,
                     llm_calls=llm_calls,
+                    mcp_token_hash=run.mcp_token_hash,
                     payload=payload,
                 ))
             await session.commit()

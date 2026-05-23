@@ -22,10 +22,11 @@ sandbox_id verification (Phase 2a.2). For now: trust the run_id.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -93,6 +94,7 @@ async def call_tool(
     tool: str,
     body: ToolCallRequest,
     session: AsyncSession = Depends(get_session),
+    authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
     # 1. Resolve the server
     try:
@@ -100,8 +102,8 @@ async def call_tool(
     except KeyError:
         raise HTTPException(404, f"unknown MCP server: {server}")
 
-    # 2. Look up which user this run belongs to
-    user_id = await _resolve_user_for_run(body.run_id)
+    # 2. Look up which user this run belongs to + validate run token
+    user_id = await _resolve_user_for_run(body.run_id, authorization)
 
     # 3. Fetch credentials if the server needs them
     credentials: dict[str, Any] | None = None
@@ -142,9 +144,12 @@ async def call_tool(
 # Helpers
 # -----------------------------------------------------------------------
 
-async def _resolve_user_for_run(run_id: str | None) -> str:
-    """Look up which user owns this run. Falls back to the default
-    single-user mode if no run_id is provided (useful for testing).
+async def _resolve_user_for_run(run_id: str | None, authorization: str | None) -> str:
+    """Look up which user owns this run and validate the per-run bearer token.
+
+    Falls back to default single-user mode when no run_id is supplied
+    (useful for direct testing). When a run IS found and it carries a
+    stored token hash, the Authorization header must match.
     """
     from app.config import get_settings
 
@@ -155,10 +160,16 @@ async def _resolve_user_for_run(run_id: str | None) -> str:
     repo = get_repository()
     run = await repo.get_run(run_id)
     if run is None:
-        # Unknown run_id — fall back to default user. We don't 401 because
-        # in single-user mode this is fine. When multi-user lands we'll
-        # tighten this.
         return settings.default_user_id
+
+    # Validate bearer token if the run was issued one.
+    if run.mcp_token_hash is not None:
+        token = None
+        if authorization and authorization.startswith("Bearer "):
+            token = authorization.removeprefix("Bearer ")
+        if token is None or hashlib.sha256(token.encode()).hexdigest() != run.mcp_token_hash:
+            raise HTTPException(401, "invalid run token")
+
     automation = await repo.get_automation(run.automation_id)
     if automation is None:
         return settings.default_user_id

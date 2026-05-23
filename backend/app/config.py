@@ -21,14 +21,26 @@ unconfigured provider.
 from __future__ import annotations
 
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Anchor all relative-path defaults to backend/ so the app works correctly
+# regardless of which directory Python was launched from.
+_BACKEND_DIR = Path(__file__).resolve().parent.parent
+_DEFAULT_STORAGE = str(_BACKEND_DIR / ".local_storage")
+_DEFAULT_DB_URL = (
+    "sqlite+aiosqlite:///"
+    + (_BACKEND_DIR / ".local_storage" / "dev.db").as_posix()
+)
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        # Also anchor .env lookup so `cd /repo && uvicorn app.main:app` still
+        # picks up backend/.env instead of /repo/.env (or nothing).
+        env_file=str(_BACKEND_DIR / ".env"),
         env_file_encoding="utf-8",
         extra="ignore",
     )

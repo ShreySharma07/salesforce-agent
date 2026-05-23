@@ -13,6 +13,8 @@ one continuous flow.
 """
 from __future__ import annotations
 
+import hashlib
+import secrets
 import uuid
 from datetime import datetime, timedelta
 
@@ -139,6 +141,12 @@ async def _execute_automation_in_sandbox(run_id: str) -> None:
         return
 
     try:
+        # Generate a per-run token. Only the hash is persisted; the
+        # plaintext is sent once to the sandbox and never stored.
+        run_token = secrets.token_urlsafe(32)
+        run.mcp_token_hash = hashlib.sha256(run_token.encode()).hexdigest()
+        await repo.save_run(run)
+
         # Spawn sandbox with API keys auto-injected from backend env
         config = SpawnConfig(
             image=settings.sandbox_image,
@@ -146,6 +154,7 @@ async def _execute_automation_in_sandbox(run_id: str) -> None:
                 **settings.llm_env_for_sandbox(),
                 "BACKEND_MCP_URL": _backend_url_for_sandbox(),
                 "RUN_ID": run.id,
+                "RUN_TOKEN": run_token,
             },
             dev_mount=settings.sandbox_dev_mount,
         )
@@ -178,7 +187,8 @@ async def _execute_automation_in_sandbox(run_id: str) -> None:
         )
 
         # Translate sandbox response into our Run model
-        if result.get("status") == "completed":
+        sandbox_status = result.get("status")
+        if sandbox_status == "completed":
             has_failures = any(
                 sr.get("status") != "succeeded"
                 for sr in result.get("step_results", [])
@@ -187,21 +197,53 @@ async def _execute_automation_in_sandbox(run_id: str) -> None:
                 RunStatus.COMPLETED_WITH_FAILURES if has_failures
                 else RunStatus.COMPLETED
             )
+        elif sandbox_status == "paused":
+            run.status = RunStatus.PAUSED_FOR_INPUT
         else:
             run.status = RunStatus.FAILED
+
+        # Map sandbox step statuses to StepExecution statuses.
+        # Sandbox: succeeded / failed / skipped / paused
+        # StepExecution additionally allows: pending / running (set by backend only)
+        _STEP_STATUS_MAP = {
+            "succeeded": "succeeded",
+            "failed":    "failed",
+            "skipped":   "skipped",
+            "paused":    "paused",
+        }
+
         run_start = run.started_at or datetime.utcnow()
         elapsed_per_step = (
             (datetime.utcnow() - run_start) / max(len(result.get("step_results", [])), 1)
         )
         for i, sr in enumerate(result.get("step_results", [])):
+            sr_status = sr.get("status", "failed")
             run.step_executions.append(StepExecution(
                 step_id=sr["step_id"],
                 started_at=run_start + elapsed_per_step * i,
                 finished_at=run_start + elapsed_per_step * (i + 1),
-                status="succeeded" if sr["status"] == "succeeded" else "failed",
-                error=sr.get("detail") if sr["status"] == "failed" else None,
+                status=_STEP_STATUS_MAP.get(sr_status, "failed"),
+                error=sr.get("detail") if sr_status != "succeeded" else None,
                 extracted_variables=sr.get("extracted", {}),
+                trace=sr.get("trace", []),
+                pause_reason=sr.get("pause_reason"),
             ))
+
+        # Accumulate cost from ReAct traces. Each LoopIteration in a step's
+        # trace carries input_tokens / output_tokens; count iterations as
+        # llm_calls. Non-UI steps have empty traces — they contribute 0.
+        total_iterations = 0
+        total_input_tokens = 0
+        total_output_tokens = 0
+        for se in run.step_executions:
+            for it in se.trace:
+                total_iterations += 1
+                total_input_tokens += it.input_tokens
+                total_output_tokens += it.output_tokens
+        run.cost.llm_calls = total_iterations
+        run.cost.input_tokens = total_input_tokens
+        run.cost.output_tokens = total_output_tokens
+
         run.summary = (
             f"{sum(1 for s in run.step_executions if s.status == 'succeeded')} of "
             f"{len(run.step_executions)} steps succeeded"

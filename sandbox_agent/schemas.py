@@ -3,6 +3,9 @@ Plan/Step schemas mirrored from backend/app/schemas/plan.py.
 
 The sandbox is a separate deployable, so we duplicate these types instead
 of importing from the backend (which would couple the two builds).
+
+Phase 2b adds ReAct trace models: LoopIteration captures one
+Reason->Act->Observe cycle; StepResult.trace is the full trajectory.
 """
 from __future__ import annotations
 
@@ -38,9 +41,6 @@ class Credential(BaseModel):
 
 
 class Plan(BaseModel):
-    # Backend serialises many extra fields (status, version, created_at, etc.)
-    # that this schema doesn't need. Explicitly ignore them so the contract is
-    # clear and immune to Pydantic default changes.
     model_config = ConfigDict(extra="ignore")
 
     id: str
@@ -72,6 +72,29 @@ class RunRequest(BaseModel):
     )
     max_steps: int = 50
     max_seconds: int = 600
+    # Phase 2b: per-step ReAct budget. A UI step's loop runs at most this
+    # many Reason->Act->Observe iterations before being marked failed.
+    max_iterations_per_step: int = 12
+    # Per-step wall-time ceiling in seconds.
+    max_seconds_per_step: int = 180
+
+
+# ---------------------------------------------------------------------------
+# Phase 2b — ReAct trace
+# ---------------------------------------------------------------------------
+
+class LoopIteration(BaseModel):
+    """One Reason->Act->Observe cycle inside a UI step's ReAct loop."""
+    iteration: int
+    thought: str = ""
+    action: str = ""                       # the action kind chosen
+    action_args: dict[str, Any] = Field(default_factory=dict)
+    observation: str = ""                  # compact text result of the action
+    screenshot_ref: str | None = None      # filename of the screenshot, if saved
+    latency_ms: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    error: str | None = None
 
 
 class StepResult(BaseModel):
@@ -79,6 +102,11 @@ class StepResult(BaseModel):
     status: Literal["succeeded", "failed", "skipped", "paused"]
     detail: str = ""
     extracted: dict[str, Any] = Field(default_factory=dict)
+    # Phase 2b: full ReAct trajectory for UI steps. Empty for non-UI steps
+    # (mcp_call, navigate, wait, etc.) which don't run a loop.
+    trace: list[LoopIteration] = Field(default_factory=list)
+    # Why the step paused, if it did (e.g. "captcha", "human_input").
+    pause_reason: str | None = None
 
 
 class RunResponse(BaseModel):
