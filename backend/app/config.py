@@ -62,7 +62,9 @@ class Settings(BaseSettings):
     sandbox_dev_mount: str | None = None
 
     # ----- Database -----
-    database_url: str = "sqlite+aiosqlite:///./.local_storage/dev.db"
+    # Default is an absolute path anchored to backend/.  If DATABASE_URL is
+    # set in .env or the environment, that value is used as-is.
+    database_url: str = _DEFAULT_DB_URL
     auto_migrate: bool = True
 
     # ----- Vault / secrets -----
@@ -84,7 +86,7 @@ class Settings(BaseSettings):
     slack_client_secret: str | None = None
 
     # ----- Storage / video processing -----
-    local_storage_root: str = "./.local_storage"
+    local_storage_root: str = _DEFAULT_STORAGE
     keyframe_extraction_fps: float = 0.5
     keyframe_max_count: int = 120
 
@@ -100,17 +102,11 @@ class Settings(BaseSettings):
     default_max_usd_per_run: float = 2.00
 
     def llm_env_for_sandbox(self) -> dict[str, str]:
-        env: dict[str, str] = {
-            "LLM_PROVIDER": self.llm_provider,
-            "LLM_MODEL": self.llm_model,
-        }
-        if self.gemini_api_key:
-            env["GEMINI_API_KEY"] = self.gemini_api_key
-        if self.anthropic_api_key:
-            env["ANTHROPIC_API_KEY"] = self.anthropic_api_key
-        if self.openai_api_key:
-            env["OPENAI_API_KEY"] = self.openai_api_key
-        return env
+        # API keys are intentionally NOT forwarded — the sandbox calls the
+        # backend's /sandbox/llm proxy, which injects credentials server-side.
+        # LLM_PROVIDER / LLM_MODEL are non-secret and used for informational
+        # purposes (logging, model selection hint passed to the proxy).
+        return {"LLM_PROVIDER": self.llm_provider, "LLM_MODEL": self.llm_model}
 
     def oauth_redirect_uri(self, provider: str) -> str:
         return f"{self.public_backend_base_url.rstrip('/')}/oauth/{provider}/callback"

@@ -127,13 +127,26 @@ def run_plan(req: RunRequest) -> RunResponse:
                 result = _run_step(page, llm, step, req)
                 step_results.append(result)
 
-                if result.status == "failed" and step.on_failure == "abort":
-                    return _finish("failed", step_results, page,
-                                   f"step {step.id} failed: {result.detail}", started)
-
+                # A step that returned 'paused' (human_input, captcha) always
+                # stops the run for intervention.
                 if result.status == "paused":
                     return _finish("paused", step_results, page,
                                    f"paused at step {step.id}: {result.pause_reason or ''}", started)
+
+                # A FAILED step is routed by its own on_failure policy.
+                if result.status == "failed":
+                    policy = (step.on_failure or "pause").lower()
+                    if policy == "abort":
+                        return _finish("failed", step_results, page,
+                                       f"step {step.id} failed (abort): {result.detail}", started)
+                    if policy == "pause":
+                        # Default policy. Stop and let a human decide — do NOT
+                        # march on into steps that depended on this one.
+                        return _finish("paused", step_results, page,
+                                       f"step {step.id} failed (pausing for review): {result.detail}",
+                                       started)
+                    # policy == "continue": the only case we proceed. Log and go on.
+                    # (Caller sees the failed step in step_results.)
 
             return _finish("completed", step_results, page, None, started)
 

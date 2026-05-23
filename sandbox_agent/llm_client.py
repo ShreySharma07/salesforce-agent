@@ -1,19 +1,31 @@
 """
-Minimal Gemini client for the sandbox. Same shape the executor + modes
-expect: a `GeminiClient` with a `.generate(prompt, system, images, json_mode, max_tokens)`
-method that returns an object with a `.text` attribute.
+Sandbox LLM client.
 
-Reads from env:
-  GEMINI_API_KEY   required
-  LLM_MODEL        default 'gemini-2.5-flash'
+The sandbox does NOT hold an LLM API key. This client calls the backend's
+/sandbox/llm/generate proxy endpoint, which makes the real Gemini call with
+the backend's key. The sandbox authenticates with its per-run RUN_TOKEN.
+
+Public surface is unchanged from the old direct-Gemini client:
+  GeminiClient().generate(prompt, system=, images=, json_mode=, max_tokens=)
+  -> GeminiResponse(text, input_tokens, output_tokens, latency_ms)
+
+so browser_mode / computer_mode need no changes.
+
+Environment variables (injected by the backend at sandbox spawn):
+  BACKEND_MCP_URL   base URL of the backend (e.g. http://host.docker.internal:8001)
+  RUN_ID            the run this sandbox is executing
+  RUN_TOKEN         per-run bearer token
+  LLM_MODEL         informational only; the backend decides the real model
 """
 from __future__ import annotations
 
+import base64
 import os
-import re
 import time
 from dataclasses import dataclass
 from typing import Any
+
+import httpx
 
 
 @dataclass
@@ -24,17 +36,25 @@ class GeminiResponse:
     latency_ms: int = 0
 
 
+class LLMClientError(Exception):
+    pass
+
+
 class GeminiClient:
+    """Name kept for compatibility — it no longer calls Gemini directly,
+    it calls the backend LLM proxy."""
+
     def __init__(self, model: str | None = None, api_key: str | None = None):
-        from google import genai
-
-        api_key = api_key or os.getenv("GEMINI_API_KEY", "")
-        if not api_key:
-            raise RuntimeError("GEMINI_API_KEY not set inside the container")
-        os.environ["GEMINI_API_KEY"] = api_key
-
+        # api_key is accepted but ignored — the sandbox never holds a key.
+        self.base_url = os.getenv("BACKEND_MCP_URL", "").rstrip("/")
+        self.run_id = os.getenv("RUN_ID")
+        self.run_token = os.getenv("RUN_TOKEN")
         self.model = model or os.getenv("LLM_MODEL", "gemini-2.5-flash")
-        self._client = genai.Client()
+        if not self.base_url:
+            raise LLMClientError(
+                "BACKEND_MCP_URL not set — the backend must inject it at "
+                "sandbox spawn so the LLM proxy can be reached."
+            )
 
     def generate(
         self,
@@ -45,57 +65,54 @@ class GeminiClient:
         json_mode: bool = False,
         max_tokens: int = 1024,
         temperature: float = 0.0,
-        _retry: int = 2,
+        _retry: int = 0,  # retained for signature compatibility; backend retries
     ) -> GeminiResponse:
-        from google.genai import types
-        from google.genai.types import Content, Part
-
-        parts: list[Any] = [Part(text=prompt)]
+        images_b64: list[str] = []
         if images:
             for img in images:
-                parts.append(Part.from_bytes(data=img, mime_type="image/png"))
-        contents = [Content(role="user", parts=parts)]
+                images_b64.append(base64.b64encode(img).decode("ascii"))
 
-        cfg: dict[str, Any] = {
+        body = {
+            "run_id": self.run_id,
+            "prompt": prompt,
+            "system": system,
+            "images_b64": images_b64,
+            "json_mode": json_mode,
+            "max_tokens": max_tokens,
             "temperature": temperature,
-            "max_output_tokens": max_tokens,
         }
-        if system:
-            cfg["system_instruction"] = system
-        if json_mode:
-            cfg["response_mime_type"] = "application/json"
-        config = types.GenerateContentConfig(**cfg)
+        headers = {}
+        if self.run_token:
+            headers["Authorization"] = f"Bearer {self.run_token}"
 
+        url = f"{self.base_url}/sandbox/llm/generate"
         start = time.monotonic()
-        for attempt in range(_retry + 1):
-            try:
-                raw = self._client.models.generate_content(
-                    model=self.model, contents=contents, config=config,
-                )
-                break
-            except Exception as exc:
-                err_str = str(exc)
-                # Retry on 429 rate-limit using the server's suggested delay
-                if attempt < _retry and "429" in err_str:
-                    delay_match = re.search(r"retry[^\d]*(\d+(?:\.\d+)?)\s*s", err_str, re.I)
-                    wait = min(float(delay_match.group(1)) if delay_match else 30.0, 60.0)
-                    time.sleep(wait)
-                    continue
-                raise
+        # Generous timeout — the backend itself retries transient errors,
+        # which can legitimately take up to ~a minute.
+        try:
+            with httpx.Client(timeout=180.0) as client:
+                r = client.post(url, json=body, headers=headers)
+        except httpx.HTTPError as e:
+            raise LLMClientError(f"LLM proxy unreachable: {e}") from e
+
         latency_ms = int((time.monotonic() - start) * 1000)
 
-        usage = getattr(raw, "usage_metadata", None)
-        in_tok = getattr(usage, "prompt_token_count", 0) or 0
-        out_tok = (
-            (getattr(usage, "candidates_token_count", 0) or 0)
-            + (getattr(usage, "thoughts_token_count", 0) or 0)
-        )
-        cand = raw.candidates[0] if raw.candidates else None
-        text = ""
-        if cand and cand.content and cand.content.parts:
-            text = "".join(p.text for p in cand.content.parts if getattr(p, "text", None))
+        if r.status_code >= 400:
+            try:
+                detail = r.json().get("detail", r.text)
+            except Exception:
+                detail = r.text[:500]
+            raise LLMClientError(f"LLM proxy returned {r.status_code}: {detail}")
+
+        data: dict[str, Any] = r.json()
+        if not data.get("ok"):
+            # Backend caught a real Gemini error — surface it like the old
+            # client did (as a raised exception the loop records in its trace).
+            raise LLMClientError(f"LLM error: {data.get('error', 'unknown')}")
 
         return GeminiResponse(
-            text=text, input_tokens=in_tok, output_tokens=out_tok,
-            latency_ms=latency_ms,
+            text=data.get("text", ""),
+            input_tokens=data.get("input_tokens", 0),
+            output_tokens=data.get("output_tokens", 0),
+            latency_ms=data.get("latency_ms", latency_ms),
         )

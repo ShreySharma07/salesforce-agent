@@ -23,7 +23,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import automations, credentials, mcp, oauth, plans, runs
+from app.api import automations, credentials, mcp, oauth, plans, runs, sandbox_llm
 from app.config import get_settings
 from app.db.base import close_engine, get_sessionmaker
 from app.db.models import User
@@ -45,9 +45,11 @@ async def _run_migrations() -> None:
     storage_root = Path(settings.local_storage_root)
     storage_root.mkdir(parents=True, exist_ok=True)
 
-    backend_dir = Path(__file__).parent.parent
+    backend_dir = Path(__file__).resolve().parent.parent
     proc = await asyncio.create_subprocess_exec(
-        sys.executable, "-m", "alembic", "upgrade", "head",
+        sys.executable, "-m", "alembic",
+        "-c", str(backend_dir / "alembic.ini"),
+        "upgrade", "head",
         cwd=backend_dir,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
@@ -133,6 +135,7 @@ def create_app() -> FastAPI:
     app.include_router(credentials.router)
     app.include_router(oauth.router)
     app.include_router(mcp.router)
+    app.include_router(sandbox_llm.router)
 
     @app.get("/health")
     def health() -> dict:
