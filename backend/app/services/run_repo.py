@@ -43,6 +43,8 @@ class Repository(ABC):
     @abstractmethod
     async def get_run(self, run_id: str) -> Run | None: ...
     @abstractmethod
+    async def get_run_by_token_hash(self, token_hash: str) -> Run | None: ...
+    @abstractmethod
     async def list_runs(self, automation_id: str | None = None) -> list[Run]: ...
 
 
@@ -174,6 +176,20 @@ class SqlRepo(Repository):
     async def get_run(self, run_id: str) -> Run | None:
         async with get_sessionmaker()() as session:
             row = await session.get(RunOrm, run_id)
+            if row is None:
+                return None
+            return Run.model_validate(row.payload)
+
+    async def get_run_by_token_hash(self, token_hash: str) -> Run | None:
+        """Return the most recent Run whose mcp_token_hash matches, or None."""
+        async with get_sessionmaker()() as session:
+            result = await session.execute(
+                select(RunOrm)
+                .where(RunOrm.mcp_token_hash == token_hash)
+                .order_by(RunOrm.created_at.desc())
+                .limit(1)
+            )
+            row = result.scalar_one_or_none()
             if row is None:
                 return None
             return Run.model_validate(row.payload)

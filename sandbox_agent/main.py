@@ -8,6 +8,11 @@ Endpoints:
 For Phase 1 we keep this synchronous — one container per run, the run
 either finishes or the container is killed. Phase 2 will add async +
 status polling for long-running plans.
+
+Note: the sandbox no longer holds an LLM API key. LLM calls are proxied
+through the backend (/sandbox/llm/generate), so the only startup
+requirement is BACKEND_MCP_URL — the address the sandbox uses to reach
+the backend for both LLM and MCP calls.
 """
 from __future__ import annotations
 
@@ -30,10 +35,16 @@ def health() -> dict[str, str]:
 
 @app.post("/run", response_model=RunResponse)
 def run(req: RunRequest) -> RunResponse:
-    if not os.getenv("GEMINI_API_KEY"):
+    # The sandbox reaches the backend for LLM (proxy) and MCP calls.
+    # Without BACKEND_MCP_URL it cannot function — fail fast and clearly.
+    if not os.getenv("BACKEND_MCP_URL"):
         raise HTTPException(
             status_code=400,
-            detail="GEMINI_API_KEY not set inside the container. Pass it via -e GEMINI_API_KEY=...",
+            detail=(
+                "BACKEND_MCP_URL not set inside the container. The backend "
+                "must inject it at sandbox spawn so the agent can reach the "
+                "LLM proxy and MCP endpoints."
+            ),
         )
     return run_plan(req)
 

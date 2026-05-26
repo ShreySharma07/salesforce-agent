@@ -23,7 +23,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import automations, credentials, mcp, oauth, plans, runs, sandbox_llm
+from app.api import automations, credentials, mcp, oauth, plans, runs, sandbox_frontdoor, sandbox_llm
 from app.config import get_settings
 from app.db.base import close_engine, get_sessionmaker
 from app.db.models import User
@@ -135,6 +135,7 @@ def create_app() -> FastAPI:
     app.include_router(credentials.router)
     app.include_router(oauth.router)
     app.include_router(mcp.router)
+    app.include_router(sandbox_frontdoor.router)
     app.include_router(sandbox_llm.router)
 
     @app.get("/health")

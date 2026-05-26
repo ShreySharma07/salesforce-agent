@@ -147,6 +147,21 @@ async def _execute_automation_in_sandbox(run_id: str) -> None:
         run.mcp_token_hash = hashlib.sha256(run_token.encode()).hexdigest()
         await repo.save_run(run)
 
+        # Build extra env vars the sandbox may need.
+        extra_env: dict[str, str] = {}
+
+        # If this plan uses Salesforce, give the sandbox a pre-built path it
+        # can append to BACKEND_MCP_URL to obtain a logged-in SF session
+        # without ever holding the raw access token.
+        uses_salesforce = any(
+            c.name.lower() == "salesforce"
+            for c in (plan.required_credentials or [])
+        )
+        if uses_salesforce:
+            extra_env["SALESFORCE_FRONTDOOR_PATH"] = (
+                f"/sandbox/frontdoor/salesforce?run_token={run_token}"
+            )
+
         # Spawn sandbox with API keys auto-injected from backend env
         config = SpawnConfig(
             image=settings.sandbox_image,
@@ -155,6 +170,7 @@ async def _execute_automation_in_sandbox(run_id: str) -> None:
                 "BACKEND_MCP_URL": _backend_url_for_sandbox(),
                 "RUN_ID": run.id,
                 "RUN_TOKEN": run_token,
+                **extra_env,
             },
             dev_mount=settings.sandbox_dev_mount,
         )
