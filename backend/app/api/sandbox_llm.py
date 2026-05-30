@@ -44,6 +44,12 @@ router = APIRouter(prefix="/sandbox/llm", tags=["sandbox-llm"])
 log = logging.getLogger("sandbox-llm")
 
 
+class QuotaExhaustedError(Exception):
+    """Raised when the LLM daily quota is exhausted. Distinct from transient
+    errors: retrying within the run is pointless, so the run should abort."""
+    pass
+
+
 class LLMGenerateRequest(BaseModel):
     run_id: str | None = None
     prompt: str
@@ -61,6 +67,9 @@ class LLMGenerateResponse(BaseModel):
     output_tokens: int = 0
     latency_ms: int = 0
     error: str | None = None
+    # True when the failure is daily-quota exhaustion — signals the sandbox
+    # to abort the whole run rather than retry or continue.
+    quota_exhausted: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -138,6 +147,23 @@ def _gemini_generate(req: LLMGenerateRequest) -> LLMGenerateResponse:
         except Exception as exc:
             last_exc = exc
             err = str(exc)
+
+            # Daily-quota exhaustion is NOT transient — it won't refill for
+            # hours. Retrying just burns ~60s per attempt for nothing. Detect
+            # it and fail fast so the run can abort instead of hanging.
+            is_daily_quota = (
+                "PerDay" in err
+                or "per day" in err.lower()
+                or "GenerateRequestsPerDayPerProject" in err
+            )
+            if is_daily_quota:
+                log.warning("daily LLM quota exhausted — failing fast (no retry)")
+                raise QuotaExhaustedError(
+                    "LLM daily quota exhausted; the run cannot continue today"
+                ) from exc
+
+            # Genuine transients: per-minute rate limits, server overload,
+            # and the occasional bad-image blip. These DO benefit from a retry.
             transient = (
                 "429" in err
                 or "503" in err
@@ -190,6 +216,11 @@ async def generate(
         return await anyio.to_thread.run_sync(_gemini_generate, req)
     except HTTPException:
         raise
+    except QuotaExhaustedError as e:
+        # Distinct signal: the run should abort, not retry or continue.
+        return LLMGenerateResponse(
+            ok=False, error=str(e), quota_exhausted=True,
+        )
     except Exception as e:
         # Surface the real error to the sandbox so its trace records it.
         return LLMGenerateResponse(
