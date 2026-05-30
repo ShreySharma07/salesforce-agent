@@ -127,6 +127,13 @@ def run_plan(req: RunRequest) -> RunResponse:
                 result = _run_step(page, llm, step, req)
                 step_results.append(result)
 
+                # Circuit breaker: quota exhaustion aborts the whole run.
+                if getattr(result, "quota_exhausted", False):
+                    return _finish("aborted", step_results, page,
+                                   f"run aborted at step {step.id}: LLM daily quota exhausted",
+                                   started)
+
+
                 # A step that returned 'paused' (human_input, captcha) always
                 # stops the run for intervention.
                 if result.status == "paused":
@@ -251,6 +258,7 @@ def _run_step(page: Page, llm: GeminiClient, step: Step, req: RunRequest) -> Ste
         extracted=extracted,
         trace=trace,
         pause_reason=outcome.get("pause_reason"),
+        quota_exhausted=outcome.get("quota_exhausted", False),
     )
 
 

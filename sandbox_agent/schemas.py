@@ -107,6 +107,9 @@ class StepResult(BaseModel):
     trace: list[LoopIteration] = Field(default_factory=list)
     # Why the step paused, if it did (e.g. "captcha", "human_input").
     pause_reason: str | None = None
+    # True if this step failed because the LLM daily quota was exhausted.
+    # The executor uses this to abort the whole run (no point continuing).
+    quota_exhausted: bool = False
 
 
 class RunResponse(BaseModel):

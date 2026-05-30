@@ -205,6 +205,17 @@ def execute_step(
             )
         except Exception as llm_err:
             err_str = str(llm_err)
+            # Daily quota exhausted — abort immediately. No retry (pointless),
+            # and signal the executor to stop the whole run.
+            if type(llm_err).__name__ == "QuotaExhaustedError" or "quota exhausted" in err_str.lower():
+                trace.append(LoopIteration(
+                    iteration=iteration, action="(reason)",
+                    error=f"LLM daily quota exhausted: {llm_err}",
+                    screenshot_ref=screenshot_ref,
+                    latency_ms=int((time.monotonic() - iter_start) * 1000),
+                ))
+                return _result("failed", "LLM daily quota exhausted", trace,
+                               quota_exhausted=True)
             # Transient Gemini image error — wait, fresh screenshot, one retry.
             if "Unable to process input image" in err_str or "INVALID_ARGUMENT" in err_str:
                 time.sleep(2)
@@ -375,10 +386,12 @@ def _result(
     trace: list[LoopIteration],
     *,
     pause_reason: str | None = None,
+    quota_exhausted: bool = False,
 ) -> dict[str, Any]:
     return {
         "status": status,
         "evidence": evidence,
         "pause_reason": pause_reason,
         "trace": trace,
+        "quota_exhausted": quota_exhausted,
     }
