@@ -26,7 +26,7 @@ def _salesforce() -> OAuthProvider:
         name="salesforce",
         authorize_url=f"{base}/services/oauth2/authorize",
         token_url=f"{base}/services/oauth2/token",
-        scopes=["api", "refresh_token", "offline_access"],
+        scopes=["api", "web", "refresh_token", "offline_access"],
         use_pkce=False,                      # supported but optional
         extra_authorize_params={
             "prompt": "login consent",       # always show approval screen — easy demo

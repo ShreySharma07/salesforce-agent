@@ -73,12 +73,7 @@ async def build_salesforce_frontdoor(
         raise FrontDoorError(
             f"singleaccess returned {resp.status_code}"
         )
-
-    try:
-        data = resp.json()
-    except Exception as e:
-        raise FrontDoorError(f"singleaccess response not JSON: {e}") from e
-
+    
     # Salesforce returns the one-time URL under "frontdoor_uri"
     # (older/newer API versions have used "url" — accept either).
     url = data.get("frontdoor_uri") or data.get("url")
