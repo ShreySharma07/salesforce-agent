@@ -29,6 +29,10 @@ from app.services.run_repo import get_repository
 from app.services.sandbox import SpawnConfig, get_sandbox_runner
 from app.services.vault import get_credential_row
 
+import logging
+
+log = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/automations", tags=["automations"])
 
 

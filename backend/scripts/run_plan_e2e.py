@@ -86,11 +86,15 @@ async def run_e2e(plan_path: Path, backend: str, name: str, watch: bool, auto_op
                 )
                 opened_view = True
                 print(f"  → opened in browser")
-            if status in ("completed", "failed", "canceled", "budget_exceeded"):
+            if status in (
+                "completed", "completed_with_failures", "failed",
+                "paused_for_input", "canceled", "budget_exceeded",
+                "paused", "aborted",
+            ):
                 break
             await asyncio.sleep(2)
 
-        print("\nFinal:")
+        print(f"\nFinal status: {status}")
         print(json.dumps(run, indent=2))
         return 0 if status == "completed" else 2
 
