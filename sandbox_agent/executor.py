@@ -107,23 +107,6 @@ def run_plan(req: RunRequest) -> RunResponse:
         )
         page = context.new_page()
 
-        # Salesforce FrontDoor login: if the backend injected a frontdoor
-        # path, navigate there once up front so the browser is logged into
-        # Salesforce before any step runs. The one-time otp is consumed here.
-        frontdoor_path = os.getenv("SALESFORCE_FRONTDOOR_PATH", "")
-        if frontdoor_path:
-            backend_base = os.getenv("BACKEND_MCP_URL", "").rstrip("/")
-            frontdoor_url = backend_base + frontdoor_path
-            try:
-                page.goto(frontdoor_url, wait_until="domcontentloaded")
-                browser_mode.wait_for_stable(page)
-            except Exception as e:
-                return RunResponse(
-                    status="failed",
-                    error=f"Salesforce frontdoor login failed: {e}",
-                    elapsed_seconds=round(time.monotonic() - started, 2),
-                )
-
         if req.initial_url:
             try:
                 page.goto(req.initial_url)

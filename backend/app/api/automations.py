@@ -19,13 +19,15 @@ import uuid
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.config import get_settings
+from app.db.base import get_sessionmaker
 from app.schemas.automation import Automation, AutomationStatus
 from app.schemas.run import Run, RunStatus, RunTrigger, StepExecution
 from app.services.run_repo import get_repository
 from app.services.sandbox import SpawnConfig, get_sandbox_runner
+from app.services.vault import get_credential_row
 
 router = APIRouter(prefix="/automations", tags=["automations"])
 
@@ -49,7 +51,7 @@ def _backend_url_for_sandbox() -> str:
 class CreateAutomationBody(BaseModel):
     name: str
     plan_id: str
-    user_id: str = "local_user"
+    user_id: str = Field(default_factory=lambda: get_settings().default_user_id)
     description: str | None = None
 
 
@@ -150,17 +152,17 @@ async def _execute_automation_in_sandbox(run_id: str) -> None:
         # Build extra env vars the sandbox may need.
         extra_env: dict[str, str] = {}
 
-        # If this plan uses Salesforce, give the sandbox a pre-built path it
-        # can append to BACKEND_MCP_URL to obtain a logged-in SF session
-        # without ever holding the raw access token.
-        uses_salesforce = any(
-            c.name.lower() == "salesforce"
-            for c in (plan.required_credentials or [])
-        )
-        if uses_salesforce:
-            extra_env["SALESFORCE_FRONTDOOR_PATH"] = (
-                f"/sandbox/frontdoor/salesforce?run_token={run_token}"
-            )
+        # Inject a frontdoor path for each provider the user actually has
+        # connected (OAuth credential in the vault). This is a backend
+        # decision — it doesn't depend on what the plan declares.
+        _FRONTDOOR_PROVIDERS = ["salesforce"]
+        user_id = auto.user_id or settings.default_user_id
+        async with get_sessionmaker()() as session:
+            for provider in _FRONTDOOR_PROVIDERS:
+                row = await get_credential_row(session, user_id=user_id, provider=provider)
+                if row is not None and row.kind == "oauth":
+                    env_key = f"{provider.upper()}_FRONTDOOR_PATH"
+                    extra_env[env_key] = f"/sandbox/frontdoor/{provider}?run_token={run_token}"
 
         # Spawn sandbox with API keys auto-injected from backend env
         config = SpawnConfig(

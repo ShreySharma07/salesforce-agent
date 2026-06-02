@@ -44,6 +44,7 @@ Actions:
   {"thought": "...", "action": "fill", "ref": <int>, "text": "<value>"}
   {"thought": "...", "action": "press", "key": "Enter"}
   {"thought": "...", "action": "navigate", "url": "https://..."}
+  {"thought": "...", "action": "open_app", "provider": "salesforce"}      # enter a connected app (e.g. Salesforce) already logged in
   {"thought": "...", "action": "scroll", "direction": "down|up|left|right"}
   {"thought": "...", "action": "wait", "seconds": <int>}
   {"thought": "...", "action": "dismiss_obstruction", "ref": <int>}   # close a popup/modal/cookie banner blocking the goal
@@ -55,6 +56,7 @@ Rules:
   - Refer to elements only by the # ref shown in ELEMENTS. Never invent a ref.
   - Use `dismiss_obstruction` when a modal, popup, overlay, or cookie banner is in the way — pick the ref of its close/accept control.
   - Use `captcha_detected` if you see a CAPTCHA, "verify you are human", or similar bot-check. Do NOT try to solve it.
+  - Use `open_app` when the task requires a connected app like Salesforce. This lands you ALREADY LOGGED IN on the app's home page. Do NOT navigate to the app's login page or try to log in yourself — emit `open_app` with the provider name and you will arrive authenticated. After that, navigate the app's UI normally.
   - Emit `done` only when the GOAL is clearly accomplished, citing concrete on-page evidence.
   - Emit `give_up` only after the trajectory shows you genuinely cannot proceed (needed element absent, repeated failures).
   - If a previous action in the TRAJECTORY did not work, try a DIFFERENT approach — never repeat the same failed action.
@@ -336,6 +338,22 @@ def _execute_action(page: Page, kind: str, action: dict) -> str:
         url = str(action["url"])
         page.goto(url)
         return f"navigated to {url}"
+
+    if kind == "open_app":
+        # Enter a connected app already logged in. The backend injected a
+        # frontdoor path per provider; navigating to it 302-redirects into a
+        # logged-in session. The sandbox never sees the underlying token.
+        provider = str(action.get("provider", "salesforce")).lower()
+        import os
+        backend_base = os.getenv("BACKEND_MCP_URL", "").rstrip("/")
+        # Provider-specific path, injected by the backend at spawn, e.g.
+        # SALESFORCE_FRONTDOOR_PATH = "/sandbox/frontdoor/salesforce?run_token=..."
+        path = os.getenv(f"{provider.upper()}_FRONTDOOR_PATH", "")
+        if not backend_base or not path:
+            return (f"cannot open app '{provider}': not connected or no "
+                    f"frontdoor path available for this run")
+        page.goto(backend_base + path, wait_until="domcontentloaded")
+        return f"opened {provider}, logged in"
 
     if kind == "scroll":
         d = action.get("direction", "down")
