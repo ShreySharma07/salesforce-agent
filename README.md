@@ -1,314 +1,250 @@
-# RAI Work Automation Agent Platform
+# 🤖 AI Work Automation Agent
 
-An autonomous agent platform that watches a screen recording of a repetitive
-task once, generates an executable plan, and runs that plan on its own inside
-an isolated cloud sandbox. The agent uses a **ReAct (Reason–Act–Observe)
-loop** to perceive a live browser, reason over screenshots, and adapt its
-actions in real time.
+> Watch a task once. The agent does it forever — autonomously, in a secure sandbox, reasoning its way through any web UI.
 
-The initial wedge is Salesforce data-hygiene tasks (creating and updating
-leads/contacts), but the architecture is general — any web UI task.
+An autonomous agent platform that turns a **single screen recording** into a repeatable automation. It generates an executable plan, runs it in an isolated cloud sandbox, and uses a **Reason → Act → Observe loop** to perceive a live browser, think through each step, and adapt in real time — the way a person would.
+
+The first focus is **Salesforce data hygiene** (creating and updating leads/contacts), but nothing about the architecture is Salesforce-specific. It's a general web-task agent.
 
 ---
 
-## What it does
+## ✨ What makes it different
 
-1. You record yourself doing a task once (a screen recording).
-2. The platform turns that recording into a structured **Plan**.
-3. You trigger the Plan, it runs autonomously in a fresh, isolated sandbox.
-4. The agent drives a real browser, reasoning step by step, and can call
-   external services (e.g. Salesforce) through a secure tool layer.
-5. You can watch it work live, and inspect a full reasoning trace afterward.
+| | |
+|---|---|
+| 🎥 **Learns by watching** | Record yourself once. No scripting, no selectors, no brittle macros. |
+| 🧠 **Genuinely agentic** | A ReAct loop reasons over live screenshots and adapts — it doesn't replay fixed clicks. |
+| 🔒 **Zero-trust by design** | The sandbox that touches the web **never holds a credential or API key.** Ever. |
+| 👁️ **Watchable & auditable** | Watch runs live; every run keeps a full step-by-step reasoning trace. |
+| 🔌 **Connected apps, on demand** | The agent decides *when* it needs Salesforce and logs in itself — via a one-time token, never a password. |
 
 ---
 
-## Architecture at a glance
-
-The system is split into two processes with a strict trust boundary:
-
-- **Backend** — the brain and memory. Holds the database, the encrypted
-  credential vault, and all business logic. Never touches a webpage directly.
-- **Sandbox** — a Docker container, spawned fresh per run, destroyed after.
-  Drives a real browser. **Never holds credentials or API keys** — it
-  authenticates back to the backend with a scoped, per-run token.
+## 🎯 How it works, in five steps
 
 ```
-  User / CLI
-      |
-      v
-  +-------------------------------------------+
-  | BACKEND (FastAPI)                         |
-  |   api/      thin HTTP layer               |
-  |   agent/    video -> plan pipeline        |
-  |   services/ repo, vault, oauth, mcp,      |
-  |             llm proxy, frontdoor, runner  |
-  |   db/       SQLite (dev) / Postgres (prod)|
-  +-------------------------------------------+
-      | spawns + sends Plan        ^ LLM + tool calls
-      v                            | (per-run token)
-  +-------------------------------------------+
-  | SANDBOX (Docker, per run)                 |
-  |   executor -> ReAct loop -> Chromium      |
-  |   LLM proxy client, MCP client            |
-  +-------------------------------------------+
-      |
-      v
-  External APIs (Gemini, Salesforce)
+   1. RECORD              2. PLAN                3. RUN
+   ┌─────────┐          ┌─────────┐           ┌──────────────┐
+   │ screen  │  ──────▶ │ executable │ ──────▶ │ isolated      │
+   │ recording│         │ plan       │         │ sandbox       │
+   └─────────┘          └─────────┘           └──────────────┘
+                                                      │
+   5. INSPECT            4. WATCH                      ▼
+   ┌─────────────┐      ┌─────────────┐         ┌──────────────┐
+   │ full reasoning│ ◀── │ live browser │ ◀────── │ ReAct agent   │
+   │ trace + cost  │     │ view (noVNC) │         │ drives the UI │
+   └─────────────┘      └─────────────┘         └──────────────┘
 ```
 
-Two security properties worth calling out:
-
-- **LLM key never enters the sandbox.** The sandbox's LLM calls are proxied
-  through the backend (`/sandbox/llm/generate`) the API key lives only on
-  the backend.
-- **Salesforce token never enters the sandbox.** The agent logs into
-  Salesforce via the OAuth2 `singleaccess` endpoint, which mints a one-time
-  login URL on the backend — the raw token stays in the vault.
-
-See `ARCHITECTURE.md` for the full design.
+1. **Record** a screen capture of the task once.
+2. The platform turns it into a structured **Plan** (FFmpeg keyframes → vision-LLM captions → plan synthesis).
+3. You trigger it; a **fresh Docker sandbox** spawns and executes the plan autonomously.
+4. **Watch it work live** in your browser.
+5. **Inspect** the full Reason → Act → Observe trace afterward — every thought, action, and observation.
 
 ---
 
-## Prerequisites
+## 🏛️ Architecture in one picture
+
+Two processes, one hard security boundary:
+
+```
+   You / CLI
+      │
+      ▼
+ ┌────────────────────────────────────────────┐
+ │  🧠 BACKEND  — holds ALL secrets            │
+ │     • API layer        • credential vault   │
+ │     • video→plan       • OAuth + frontdoor  │
+ │     • LLM proxy        • sandbox runner     │
+ │     • database (SQLite / Postgres)          │
+ └────────────────────────────────────────────┘
+      │  spawns + sends Plan      ▲  LLM & tool calls
+      ▼  (scoped per-run token)   │  (no secrets travel down)
+ ┌────────────────────────────────────────────┐
+ │  🦾 SANDBOX — Docker, one per run           │
+ │     • executor → ReAct loop → Chromium      │
+ │     • holds ONLY a per-run token            │
+ └────────────────────────────────────────────┘
+      │
+      ▼
+   🌐 Gemini   ☁️ Salesforce
+```
+
+**The backend is the brain and the vault. The sandbox is the hands.** The hands never hold the keys.
+
+Two security properties this guarantees:
+
+- 🔑 **The LLM API key never enters the sandbox.** All model calls are proxied through the backend.
+- 🎫 **The Salesforce token never enters the sandbox.** The agent logs in via Salesforce's `singleaccess` endpoint, which mints a **one-time login URL** on the backend — the real token stays locked in the vault.
+
+Full design: see [`ARCHITECTURE.md`](./ARCHITECTURE.md).
+
+---
+
+## 🚀 Quick start
+
+### Prerequisites
 
 - **Python 3.12**
 - **Docker Desktop** (running)
-- **ffmpeg** (for video keyframe extraction): `brew install ffmpeg` on macOS
-- A **Google Gemini API key** (free tier works for light use; paid recommended
-  for real iteration — the free tier is capped at 20 calls/day per project)
-- (Optional, for Salesforce features) A **Salesforce org** you control — a free
-  Developer Edition org from developer.salesforce.com works perfectly
+- **ffmpeg** — `brew install ffmpeg`
+- A **Google Gemini API key** ([aistudio.google.com](https://aistudio.google.com)) — *billing recommended; the free tier caps at 20 calls/day per project*
+- *(optional)* a **Salesforce org** you control — a free [Developer Edition](https://developer.salesforce.com/signup) works perfectly
 
----
-
-## Setup
-
-### 1. Clone and install
+### 1 · Install
 
 ```bash
 git clone <your-repo-url> salesforce-agent
 cd salesforce-agent/backend
-python3.12 -m venv .venv
-source .venv/bin/activate
-pip install -e .          # or: pip install -r requirements.txt
+python3.12 -m venv .venv && source .venv/bin/activate
+pip install -e .
 ```
 
-### 2. Configure environment
-
-Copy the example env file and fill it in:
+### 2 · Configure `backend/.env`
 
 ```bash
 cp .env.example .env
 ```
 
-Required values in `backend/.env`:
-
-```
-# LLM
-GEMINI_API_KEY=<your gemini api key>
+```ini
+GEMINI_API_KEY=<your key>
 LLM_PROVIDER=gemini
 LLM_MODEL=gemini-2.5-flash
 
-# Vault encryption key — generate with:
-#   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+# generate: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 VAULT_ENCRYPTION_KEY=<generated key>
 
-# How the outside world reaches this backend (used for OAuth callbacks)
 PUBLIC_BACKEND_BASE_URL=http://localhost:8001
 ```
 
-Optional — Salesforce (only if using Salesforce features), see step 6:
+> ⚠️ **Don't also `export GEMINI_API_KEY` in your shell.** A shell variable overrides `.env` and causes "wrong key" confusion. Keep it only in `.env`.
 
-```
-SALESFORCE_CLIENT_ID=<connected app consumer key>
-SALESFORCE_CLIENT_SECRET=<connected app consumer secret>
-SALESFORCE_AUTH_URL=https://login.salesforce.com
-```
-
-**Important:** do NOT also export `GEMINI_API_KEY` in your shell (`.zshrc`
-etc.). A shell-exported variable overrides `.env` and causes confusing
-"wrong key" bugs. Keep the key only in `.env`.
-
-### 3. Build the sandbox Docker image
+### 3 · Build the sandbox image
 
 ```bash
-# from the repo root (not backend/)
-cd ..
+cd ..                       # repo root
 docker build -t agent-sandbox:latest -f sandbox/Dockerfile .
+docker image inspect agent-sandbox:latest >/dev/null 2>&1 && echo "✅ FOUND" || echo "❌ MISSING"
 ```
 
-Confirm it built correctly:
-
-```bash
-docker image inspect agent-sandbox:latest > /dev/null 2>&1 && echo FOUND || echo MISSING
-```
-
-Must print `FOUND`. (Re-tag with `docker tag <image-id> agent-sandbox:latest`
-if the name came out wrong.)
-
-### 4. Run the backend
+### 4 · Run the backend
 
 ```bash
 cd backend
 python -m app.main
+# → "Backend up." on http://localhost:8001
+curl -s http://localhost:8001/health | python -m json.tool   # vault_configured: true
 ```
 
-Migrations run automatically on startup. You should see `Backend up. ...`
-and the server listening on `http://localhost:8001`.
-
-Health check:
+### 5 · Run a demo (no credentials needed)
 
 ```bash
-curl -s http://localhost:8001/health | python -m json.tool
-```
-
-`vault_configured` should be `true`.
-
-### 5. Run a demo plan (no credentials needed)
-
-```bash
-cd backend
 python -m scripts.run_plan_e2e .local_storage/plans/plan_arxiv_demo.json --watch
 ```
 
-A `watch:` URL is printed — open it to watch the agent live (noVNC). When the
-run finishes, inspect it:
+Open the printed `watch:` URL to see the agent live. When it finishes:
 
 ```bash
 curl -s http://localhost:8001/runs/<run_id> | python -m json.tool
+#   → step_executions[].trace shows the agent's reasoning, step by step
 ```
-
-Look at `step_executions[].trace` to see the agent's reasoning step by step.
-
-### 6. (Optional) Connect Salesforce
-
-This is a one-time account connection. You only do it once; afterward the
-platform keeps the token fresh on its own.
-
-**a. Create a Connected App** in your Salesforce org:
-   - Setup -> App Manager -> New Connected App
-   - Enable OAuth Settings
-   - Callback URL: `http://localhost:8001/oauth/salesforce/callback`
-   - OAuth Scopes: add **Full access (full)**, **Manage user data via APIs
-     (api)**, and **Perform requests at any time (refresh_token,
-     offline_access)**
-   - Save, then wait ~10 minutes for it to propagate
-
-**b. Copy the Consumer Key + Secret** (Manage Consumer Details) into
-   `backend/.env` (`SALESFORCE_CLIENT_ID`, `SALESFORCE_CLIENT_SECRET`).
-   Restart the backend.
-
-**c. Connect:**
-```bash
-curl -s http://localhost:8001/oauth/providers | python -m json.tool
-#   salesforce should show "configured": true
-```
-   Then open `http://localhost:8001/oauth/salesforce/connect` in a browser,
-   log in, and click Allow. You should land on a green success page.
-
-**d. Verify:**
-```bash
-curl -s http://localhost:8001/oauth/providers | python -m json.tool
-#   salesforce should now show "connected": true
-```
-
-The Salesforce token is now encrypted in the vault. Plans that use Salesforce
-will work from now on without re-logging-in.
 
 ---
 
-## Project layout
+## 🔗 Connect Salesforce *(optional, one-time)*
+
+A one-time account connection — afterward the platform keeps the token fresh automatically.
+
+1. **Create a Connected App** in your Salesforce org (Setup → App Manager → New Connected App):
+   - Enable OAuth Settings
+   - Callback URL: `http://localhost:8001/oauth/salesforce/callback`
+   - Scopes: **Full access (full)**, **Manage user data via APIs (api)**, **Perform requests at any time (refresh_token, offline_access)**
+   - Save, then **wait ~10 min** for it to propagate
+2. Copy the **Consumer Key + Secret** into `.env` (`SALESFORCE_CLIENT_ID`, `SALESFORCE_CLIENT_SECRET`), keep `SALESFORCE_AUTH_URL=https://login.salesforce.com`, restart the backend.
+3. **Connect:** open `http://localhost:8001/oauth/salesforce/connect` in a browser → log in → Allow → green ✅ page.
+4. **Verify:** `curl -s http://localhost:8001/oauth/providers` → salesforce `"connected": true`.
+
+The token is now encrypted in the vault. From here on, any plan that needs Salesforce just works — the agent logs itself in on demand via a one-time URL, never touching the token.
+
+---
+
+## 🗂️ Project layout
 
 ```
 salesforce-agent/
-  backend/
-    app/
-      main.py            FastAPI app; runs migrations on startup
-      config.py          all settings, from environment variables
-      api/               HTTP endpoints (plans, automations, runs,
-                         credentials, oauth, mcp, sandbox_llm,
-                         sandbox_frontdoor)
-      agent/             video -> plan pipeline
-      db/                SQLAlchemy models + Alembic migrations
-      schemas/           Pydantic models (the API contract)
-      services/          business logic (repo, vault, oauth, mcp,
-                         frontdoor, sandbox runner)
-    scripts/             CLI tools (process_video, run_plan_e2e, ...)
-    .env                 secrets + config (gitignored)
-  sandbox/               Docker image definition
-  sandbox_agent/         code that runs INSIDE the container
-    main.py              sandbox HTTP server (/run)
-    executor.py          walks the Plan, dispatches each step
-    browser_mode.py      the ReAct loop (Reason-Act-Observe)
-    computer_mode.py     xdotool desktop-control fallback
-    llm_client.py        HTTP client to the backend LLM proxy
-    mcp_client.py        HTTP client to the backend MCP endpoint
-    schemas.py           sandbox-side Pydantic models
-  ARCHITECTURE.md        full architecture document
+├── backend/
+│   └── app/
+│       ├── main.py          # FastAPI app; migrations on startup
+│       ├── config.py        # all settings, from environment
+│       ├── api/             # HTTP endpoints (plans, automations, runs,
+│       │                    #   oauth, mcp, sandbox_llm, sandbox_frontdoor)
+│       ├── agent/           # video → plan pipeline
+│       ├── services/        # vault, oauth, mcp, frontdoor, sandbox runner
+│       ├── db/              # SQLAlchemy models + Alembic migrations
+│       └── schemas/         # Pydantic contracts
+├── sandbox/                 # Docker image definition
+└── sandbox_agent/           # code that runs INSIDE the container
+    ├── executor.py          # walks the Plan, dispatches each step
+    ├── browser_mode.py      # the ReAct loop (Reason-Act-Observe)
+    ├── llm_client.py        # → backend LLM proxy (no key here)
+    └── mcp_client.py        # → backend MCP endpoint
 ```
 
 ---
 
-## Common commands
+## 🛠️ Everyday commands
 
 ```bash
-# Backend (from backend/, in a shell where GEMINI_API_KEY is NOT exported)
+# start backend (shell where GEMINI_API_KEY is NOT exported)
 python -m app.main
 
-# Free port 8001 if a stale backend is holding it
+# free port 8001 if a stale backend holds it
 lsof -ti:8001 | xargs kill -9
 
-# Rebuild the sandbox image (REQUIRED after editing anything in sandbox_agent/)
+# rebuild sandbox image — REQUIRED after editing anything in sandbox_agent/
 docker build --no-cache -t agent-sandbox:latest -f sandbox/Dockerfile .
 
-# Run a plan end-to-end with live view
+# run a plan with live view
 python -m scripts.run_plan_e2e .local_storage/plans/<plan>.json --watch
 
-# Inspect a run + its reasoning trace
+# inspect a run + its reasoning trace
 curl -s http://localhost:8001/runs/<run_id> | python -m json.tool
 ```
 
 ---
 
-## Troubleshooting
+## 🩹 Troubleshooting
 
-- **`address already in use` on startup** — a stale backend holds the port:
-  `lsof -ti:8001 | xargs kill -9`, then restart.
-- **Wrong / old Gemini key being used** — you have `GEMINI_API_KEY` exported
-  in your shell, which overrides `.env`. Remove it from `~/.zshrc`, open a
-  fresh terminal (`echo $GEMINI_API_KEY` should be blank), restart the backend.
-- **`Sandbox image not found` warning** — the image name is wrong or the
-  backend started before the build. Verify with
-  `docker image inspect agent-sandbox:latest`; re-tag or rebuild, then restart.
-- **Changes to `sandbox_agent/` files don't take effect** — you must rebuild
-  the Docker image (`docker build --no-cache ...`). The backend you can just
-  restart; the sandbox you must rebuild.
-- **"Salesforce not connected" despite being connected** — the data lives in
-  the SQLite DB, not the `.local_storage/*.json` files. Editing files does
-  nothing, the API reads the DB. Use the API/DB as the source of truth.
-- **Out of LLM quota / runs aborting** — the free Gemini tier is 20 calls/day
-  per project. A multi-step run can exhaust it. Enable billing for real
-  iteration.
+| Symptom | Cause & fix |
+|---|---|
+| `address already in use` on startup | Stale backend holds the port → `lsof -ti:8001 \| xargs kill -9`, restart. |
+| Wrong / old Gemini key used | `GEMINI_API_KEY` exported in your shell overrides `.env` → remove from `~/.zshrc`, fresh terminal (`echo $GEMINI_API_KEY` blank), restart. |
+| `Sandbox image not found` | Image misnamed or backend started before build → `docker image inspect agent-sandbox:latest`; re-tag/rebuild, restart. |
+| `sandbox_agent/` edits do nothing | You must **rebuild the image**. Backend = restart; sandbox = rebuild. |
+| "Salesforce not connected" despite being connected | Source of truth is the **SQLite DB**, not the `.local_storage/*.json` files. Check via the API, not the files. |
+| Runs abort with "quota exhausted" | Free Gemini tier = 20 calls/day **per project**. A multi-step run exhausts it. Enable billing. |
 
 ---
 
-## Status
+## 📍 Status
 
-Working and verified:
-- Video -> plan pipeline
+**✅ Built & verified**
+- Video → plan pipeline
 - ReAct executor loop with full reasoning trace + cost tracking
 - Isolated Docker sandbox with live (noVNC) view
-- LLM proxy (sandbox holds no API key)
-- Per-run token auth for sandbox -> backend calls
+- LLM proxy — sandbox holds no API key
+- Per-run token auth for every sandbox → backend call
 - Encrypted credential vault + OAuth (Salesforce)
-- Salesforce `singleaccess` FrontDoor (one-time login URL)
+- `singleaccess` FrontDoor — one-time login URL, token never leaves the backend
+- **Agent-initiated `open_app`** — the agent decides on its own when it needs a connected app and logs in lazily, mid-task
+- Quota circuit-breaker — fails fast & clean instead of hanging
+- Executor honors per-step `on_failure` (abort / pause / continue)
 
-In progress:
-- Agent-initiated "open Salesforce" action (lazy, on-demand login mid-plan)
-- Reliability hardening (transient-error retries, quota circuit breaker)
+**🚧 In progress**
+- Final end-to-end Salesforce-UI run (mechanism verified; gated on LLM quota)
 
-Roadmap:
-- Multi-user / authentication (currently single default user)
-- Web dashboard (upload, plan review, run history)
-- Scheduling and triggers
-```
+**🗺️ Roadmap**
+- Multi-user + authentication (currently single default user)
+- Web dashboard (upload · plan review · live run · history)
+- Scheduling & triggers

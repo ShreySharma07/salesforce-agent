@@ -1,243 +1,280 @@
 # Architecture
 
-AI Work Automation Platform — a system that watches a screen recording of a
-repetitive task once, generates an executable plan, and runs that plan
-autonomously in an isolated cloud sandbox.
-
-This document describes the system as of **Phase 2b** (ReAct executor loop).
+How the AI Work Automation Agent is built — the design decisions, the data
+flow, and the security model. Current as of the `open_app` / on-demand-login
+milestone.
 
 ---
 
-## 1. The big picture
+## 1 · The core idea
 
-The system is split into **two processes** that run independently:
+The system has **two processes** separated by a hard trust boundary:
 
-- **The backend** — a long-running Python/FastAPI service. The brain and the
-  memory. Holds the database, the credential vault, and all business logic.
-  Never touches a webpage directly.
-- **The sandbox** — a Docker container, created fresh for every task run and
-  destroyed afterward. The hands. Drives a real browser and desktop. Never
-  holds a credential directly.
+- **🧠 Backend** — a long-running FastAPI service. The *brain and the vault*.
+  Holds the database, the encrypted credentials, and all business logic.
+  **Never touches a webpage.**
+- **🦾 Sandbox** — a Docker container, spawned fresh for every run and
+  destroyed after. The *hands*. Drives a real Chromium browser.
+  **Never holds a credential or an API key** — it authenticates back to the
+  backend with a random, scoped, per-run token.
 
-This separation is the core security principle of the project: the component
-that touches untrusted web content (the sandbox) is never the component that
-holds secrets (the backend). They communicate over HTTP, and the sandbox
-authenticates with a per-run token that is useless outside its own run.
+> The component that touches untrusted web content is never the component
+> that holds secrets. This one principle shapes the entire design.
 
 ```
-  User / CLI
-      │
-      ▼
-  ┌─────────────────────────────────────────┐
-  │ BACKEND (FastAPI)                        │
-  │   api/  ─ thin HTTP layer                │
-  │   agent/ ─ video → plan pipeline         │
-  │   services/ ─ repo, vault, oauth, mcp    │
-  │   db/  ─ SQLite (dev) / Postgres (prod)  │
-  └─────────────────────────────────────────┘
-      │ spawns + sends Plan          ▲ MCP calls
-      ▼                              │ (per-run token)
-  ┌─────────────────────────────────────────┐
-  │ SANDBOX (Docker, per run)                │
-  │   executor → ReAct loop / computer mode  │
-  │   Chromium + virtual display + VNC       │
-  └─────────────────────────────────────────┘
-      │
-      ▼
-  External APIs (Gemini, Salesforce, Gmail)
+        ┌──────────────────────────────────────────────┐
+        │  BACKEND  (brain + vault)                      │
+        │                                                │
+        │   api/        thin HTTP layer                  │
+        │   agent/      video → plan pipeline            │
+        │   services/   repo · vault · oauth · mcp ·     │
+        │               llm-proxy · frontdoor · runner   │
+        │   db/         SQLite (dev) / Postgres (prod)   │
+        └──────────────────────────────────────────────┘
+            │ spawn + Plan            ▲ LLM + tool calls
+            │ (inject RUN_TOKEN)      │ (Bearer RUN_TOKEN)
+            ▼                         │
+        ┌──────────────────────────────────────────────┐
+        │  SANDBOX  (hands — one per run)                │
+        │                                                │
+        │   executor → ReAct loop → Chromium             │
+        │   llm_client · mcp_client  (no secrets held)   │
+        └──────────────────────────────────────────────┘
+            │
+            ▼   🌐 Gemini      ☁️ Salesforce
 ```
 
 ---
 
-## 2. Directory layout
+## 2 · The journey of a task
+
+### 2.1 — Recording becomes a Plan
 
 ```
-salesforce-agent/
-├── backend/
-│   ├── app/
-│   │   ├── main.py            FastAPI app; runs migrations on startup
-│   │   ├── config.py          all settings, from environment variables
-│   │   ├── api/               HTTP endpoints (thin glue)
-│   │   │   ├── plans.py
-│   │   │   ├── automations.py the /run endpoint lives here
-│   │   │   ├── runs.py
-│   │   │   ├── credentials.py
-│   │   │   ├── oauth.py
-│   │   │   └── mcp.py         sandbox calls back to this
-│   │   ├── agent/             video → plan pipeline
-│   │   │   ├── video_processor.py
-│   │   │   ├── keyframe_captioner.py
-│   │   │   └── plan_generator.py
-│   │   ├── core/llm/          LLM provider abstraction
-│   │   ├── db/                SQLAlchemy models + Alembic migrations
-│   │   ├── schemas/           Pydantic models (the API contract)
-│   │   └── services/          business logic
-│   │       ├── run_repo.py    the single SqlRepo
-│   │       ├── vault.py       Fernet-encrypted credential storage
-│   │       ├── oauth/         OAuth 2.0 flow + token refresh
-│   │       ├── mcp/           MCP servers (mock / salesforce / gmail)
-│   │       └── sandbox/       sandbox runners (local_docker)
-│   ├── scripts/               CLI tools
-│   ├── alembic.ini
-│   └── .env                   secrets + config (gitignored)
-│
-├── sandbox/                   Docker image definition
-│   ├── Dockerfile
-│   ├── supervisord.conf
-│   └── entrypoint.sh
-│
-└── sandbox_agent/             code that runs INSIDE the container
-    ├── main.py                FastAPI server on :8000
-    ├── executor.py            walks the Plan, dispatches each step
-    ├── browser_mode.py        the ReAct loop (Reason-Act-Observe)
-    ├── computer_mode.py       xdotool desktop-control fallback
-    ├── grounding.py           DOM element identification
-    ├── llm_client.py          LLM calls from inside the sandbox
-    ├── mcp_client.py          HTTP client → backend /mcp endpoint
-    └── schemas.py             sandbox-side Pydantic models
+screen recording → [video_processor] → keyframes (ffmpeg)
+                 → [keyframe_captioner] → per-frame descriptions (Gemini)
+                 → [plan_generator] → structured Plan → saved to DB
+```
+
+The **Plan is the master contract** of the whole system. Everything upstream
+produces it; everything downstream consumes it. A Plan is a list of typed
+**Steps** (`navigate`, `ui_action`, `extract`, `mcp_call`, `wait`, …), each
+with an `on_failure` policy.
+
+### 2.2 — Plan becomes a Run
+
+```
+POST /automations/{id}/run
+   → create Run row
+   → mint RUN_TOKEN (store only its SHA-256 hash on the Run)
+   → spawn sandbox, inject: RUN_TOKEN, BACKEND_MCP_URL, RUN_ID,
+                            and per-connected-provider frontdoor paths
+   → POST the Plan to the sandbox's /run endpoint
+```
+
+### 2.3 — The Run executes
+
+Inside the sandbox, the **executor** walks the Plan and dispatches each step
+by kind:
+
+- `navigate` / `wait` → handled directly
+- `mcp_call` → straight to the backend MCP endpoint (no LLM cost)
+- `ui_action` / `extract` → the **ReAct loop** (see §3)
+
+When the run ends, the sandbox returns a `RunResponse` carrying every step's
+result **and its full reasoning trace**. The backend persists it and tears
+the container down.
+
+---
+
+## 3 · The ReAct loop — what makes it agentic
+
+A UI step is treated as a **goal**, not a fixed instruction. The loop repeats:
+
+```
+   ┌─────────────────────────────────────────────┐
+   │  OBSERVE   wait for the page to settle,       │
+   │            screenshot + extract elements      │
+   │     │                                         │
+   │     ▼                                         │
+   │  REASON    send Gemini the goal, the screen,  │
+   │            and the FULL trajectory so far     │
+   │     │                                         │
+   │     ▼                                         │
+   │  ACT       perform one chosen action          │
+   │     │                                         │
+   │     └──────────── loop ◀──────────────────────┤
+   └─────────────────────────────────────────────┘
+        ends on: done · give_up · captcha · budget
+```
+
+Key design choices:
+
+- **Full-trajectory memory** — every turn the agent sees all prior
+  (thought, action, observation). This is what stops it repeating a failed
+  approach. (Past *screenshots* are referenced, not re-embedded, to bound
+  token cost.)
+- **Wait-for-stable before every Observe** — most "screenshotted mid-render"
+  flake is eliminated here, not in the reasoning.
+- **A rich action vocabulary** — `click`, `fill`, `navigate`, `scroll`,
+  `dismiss_obstruction` (clear a popup), `open_app` (enter a connected app
+  logged in — see §5), `captcha_detected` (pause for a human, never solve),
+  `done`, `give_up`.
+- **Hard budgets** — per-step max iterations and wall-time, so a confused
+  agent can't loop forever or burn unbounded LLM calls.
+- **Every iteration is traced** — `{thought, action, observation,
+  screenshot_ref, latency, tokens}` is recorded and persisted. This is both
+  the debugging tool and the evidence that the agent genuinely reasons.
+
+---
+
+## 4 · The security model
+
+### 4.1 — Zero-trust sandbox
+The sandbox is the only thing touching untrusted web pages, so it's the one
+thing that holds **no long-lived secrets**. It gets a single `RUN_TOKEN`
+(random, hashed-on-the-Run, useless outside its own run) and nothing else.
+
+### 4.2 — The LLM proxy
+The sandbox never holds the LLM API key. Its `llm_client` is a thin HTTP
+client that calls the backend's `/sandbox/llm/generate`, authenticating with
+the `RUN_TOKEN`. The backend makes the real Gemini call with *its* key.
+
+```
+sandbox.llm_client ──(RUN_TOKEN)──▶ backend /sandbox/llm ──(API key)──▶ Gemini
+```
+
+A `printenv` inside the container reveals no API key. The key lives in
+exactly one place.
+
+### 4.3 — The credential vault
+OAuth tokens and API keys are **Fernet-encrypted** before they touch the
+database. The encryption key lives only in `VAULT_ENCRYPTION_KEY` (env var,
+never in the DB). Non-secret metadata (`instance_url`, `scope`) is stored
+in the clear so the system can show connection status without decrypting.
+
+### 4.4 — Per-run token validation
+Every sandbox → backend call (`/mcp`, `/sandbox/llm`, `/sandbox/frontdoor`)
+carries the `RUN_TOKEN` as a bearer credential. The backend hashes it and
+compares to the hash stored on the Run. A compromised sandbox can act only
+for its own run — it cannot swap a run_id to reach another user's data.
+
+---
+
+## 5 · Connecting to Salesforce — OAuth + `singleaccess`
+
+This is the part that lets the agent operate a *logged-in* Salesforce UI
+without ever holding the Salesforce token.
+
+### 5.1 — One-time connection (OAuth)
+
+```
+You → /oauth/salesforce/connect → Salesforce login → click Allow
+   → Salesforce redirects the code to YOUR /oauth/salesforce/callback
+   → backend exchanges code for tokens
+   → tokens encrypted into the vault
+```
+
+The callback **must** reach the backend — that's the whole reason a
+registered callback URL is required. (A third-party callback like Postman's
+can't work: the code would land somewhere the backend can't read, so the
+vault would stay empty.)
+
+### 5.2 — Per-run login (`singleaccess`)
+
+When the agent decides it needs Salesforce, it emits the **`open_app`**
+action. The system turns that into a logged-in session — lazily, on demand,
+without the sandbox ever seeing the token:
+
+```
+agent: open_app "salesforce"
+   → sandbox navigates to backend /sandbox/frontdoor/salesforce?run_token=…
+   → backend validates RUN_TOKEN, resolves the user
+   → reads the Salesforce token from the vault (refreshing if expired)
+   → calls Salesforce POST /services/oauth2/singleaccess  (token stays server-side)
+   → Salesforce returns a ONE-TIME login URL
+   → backend 302-redirects the sandbox browser to it
+   → browser lands in a logged-in Salesforce session
+```
+
+The raw token exists only in the vault and in the backend's memory during
+the `singleaccess` call. The browser only ever follows a **single-use**
+URL — worthless after one use. This is why `singleaccess` is used instead of
+the older `frontdoor.jsp?sid=<token>` form, which would expose the raw token
+in a URL.
+
+**Auth is the system's job; navigation is the agent's job.** `open_app` gets
+the agent *into* Salesforce logged in; from there the agent navigates the
+Lightning UI itself by understanding it — no hardcoded URLs.
+
+---
+
+## 6 · Reliability
+
+- **Honors `on_failure`** — a failed step is routed by its declared policy:
+  `abort` stops the run, `pause` halts for human review (so a broken
+  prerequisite never lets a dependent step run), `continue` proceeds.
+- **Transient-error retries** — the LLM proxy retries 429 (rate), 503
+  (overload), and the occasional bad-image blip, with backoff.
+- **Quota circuit-breaker** — *daily* quota exhaustion is detected and fails
+  fast (no pointless retry sleeps), and aborts the whole run immediately
+  rather than marching every remaining step into the same wall.
+
+---
+
+## 7 · Directory map
+
+```
+backend/app/
+  main.py            FastAPI app; runs migrations on startup
+  config.py          single typed Settings object (12-factor, env-driven)
+  api/               thin HTTP routers, one concern each
+  agent/             video → plan pipeline
+  db/                SQLAlchemy 2.0 async models + Alembic migrations
+  schemas/           Pydantic models — the API contract
+  services/
+    run_repo.py      the single SqlRepo (all DB access goes through it)
+    vault.py         Fernet-encrypted credential storage
+    oauth/           OAuth 2.0 flow + automatic token refresh
+    mcp/             MCP servers wrapping external APIs as tools
+    frontdoor.py     Salesforce singleaccess URL builder
+    sandbox/         sandbox runners (local_docker)
+
+sandbox_agent/       (runs INSIDE the container)
+  main.py            sandbox HTTP server (/run)
+  executor.py        walks the Plan, dispatches each step
+  browser_mode.py    the ReAct loop
+  computer_mode.py   xdotool desktop fallback
+  llm_client.py      → backend LLM proxy
+  mcp_client.py      → backend MCP endpoint
 ```
 
 ---
 
-## 3. The layers, bottom-up
+## 8 · Design principles
 
-### Configuration — `config.py`
-One typed `Settings` object loaded from environment variables. Single source
-of truth for the database URL, LLM provider, vault key, OAuth credentials,
-and the public backend URL. Switching environments (dev → prod) is a config
-change, never a code change.
-
-### Database — `db/`
-SQLAlchemy 2.0 async ORM. Six tables: `users`, `credentials`, `oauth_states`,
-`plans`, `automations`, `runs`. Complex nested data (a Plan's steps, a Run's
-step executions) is stored in JSON columns; the few fields used for queries
-(status, user_id) are lifted into their own indexed columns. Alembic
-migrations run automatically on backend startup, in a subprocess to avoid an
-async-driver deadlock.
-
-### Schemas — `schemas/`
-Pydantic models defining the shape of data crossing the API. Kept separate
-from the ORM models: schemas are the public contract, ORM models are storage.
-The **Plan** is the master contract — every component either produces or
-consumes a Plan.
-
-### Services — `services/`
-The real logic.
-- **`run_repo.py`** — the single `SqlRepo`. All Plan/Automation/Run reads and
-  writes go through it. The API layer never sees SQL.
-- **`vault.py`** — encrypts secrets with Fernet before they touch the
-  database. The encryption key lives only in an environment variable.
-- **`oauth/`** — generic OAuth 2.0 Authorization Code flow plus automatic
-  token refresh. One implementation serves Salesforce, Google, and Slack.
-- **`mcp/`** — MCP servers, each wrapping an external API (Salesforce, Gmail)
-  as typed callable tools. Plus a mock server for credential-free testing.
-- **`sandbox/`** — spawns and tears down sandbox containers.
-
-### Agent pipeline — `agent/`
-Turns a screen recording into a Plan: `video_processor` (ffmpeg keyframes) →
-`keyframe_captioner` (Gemini describes each frame) → `plan_generator`
-(Gemini synthesizes a structured Plan).
-
-### API — `api/`
-Thin HTTP glue. Each file is one FastAPI router that validates input and
-delegates to a service. The most important endpoint is
-`POST /automations/{id}/run`.
-
----
-
-## 4. The sandbox
-
-Spawned fresh per run, destroyed after. Inside the container:
-
-- **Display stack** — Xvfb (a virtual screen), x11vnc + noVNC (stream that
-  screen so a human can watch the agent live in a browser tab),
-  supervisord (keeps all processes alive).
-- **`executor.py`** — receives the Plan, walks its steps, dispatches each by
-  `kind`.
-- **`browser_mode.py`** — the **ReAct loop**. For UI steps, runs
-  Reason → Act → Observe cycles (see §6).
-- **`computer_mode.py`** — fallback that controls the whole desktop with
-  xdotool when browser mode is stuck.
-- **`mcp_client.py`** — calls the backend's `/mcp` endpoint for `mcp_call`
-  steps, authenticating with the per-run token.
-
-The sandbox never holds an OAuth token. For anything credentialed, it asks
-the backend.
-
----
-
-## 5. End-to-end flow
-
-**Record → Plan.** `process_video.py` → ffmpeg keyframes → Gemini captions →
-Gemini synthesizes a Plan → saved to the database via `SqlRepo`.
-
-**Trigger → Run.** `POST /automations/{id}/run` loads the Plan, creates a Run
-record, generates a random `RUN_TOKEN` (stores only its hash), spawns a
-sandbox container with `RUN_ID`, `RUN_TOKEN`, and the backend URL injected,
-then POSTs the Plan to the sandbox.
-
-**Execute.** The executor walks the steps. UI steps run the ReAct loop
-driving Chromium. `mcp_call` steps call back to the backend. A human can
-watch live over VNC.
-
-**Credentialed calls.** For an `mcp_call`, the sandbox's `mcp_client` calls
-the backend's `/mcp/{server}/{tool}` with the `RUN_TOKEN`. The backend
-validates the token, resolves which user the run belongs to, fetches that
-user's credentials from the vault (refreshing if expired), and calls the
-real API. The token never enters the sandbox.
-
-**Finish.** The sandbox returns a RunResponse with every step's result and
-the full ReAct trace. The backend saves it, tears down the container, and
-the result is available at `GET /runs/{id}`.
-
----
-
-## 6. The ReAct loop (Phase 2b)
-
-A UI step is treated as a **goal**, not a fixed instruction. The loop
-repeats:
-
-1. **Observe** — wait for the page to stabilize (`wait_for_stable`), capture
-   a screenshot and the list of interactive elements.
-2. **Reason** — send Gemini the goal, the current screenshot, and the
-   *entire trajectory* of past (thought, action, observation) for this step.
-   Gemini returns one action.
-3. **Act** — perform the action via Playwright.
-
-It repeats until the goal is met, the agent gives up, a CAPTCHA is detected
-(the loop pauses for a human — it never tries to solve one), or an
-iteration / wall-time budget is exhausted. Every cycle is recorded into a
-trace, persisted on the Run, and readable afterward. Feeding the full
-trajectory back each turn is what stops the agent repeating a failed
-approach — the core of "agentic" behaviour.
-
----
-
-## 7. Security model
-
-- **Zero-trust sandbox.** The component touching untrusted web content never
-  holds long-lived credentials.
-- **Per-run token.** Each run gets a random `RUN_TOKEN`; only its hash is
-  stored. The backend validates it on every MCP call, so a compromised
-  sandbox can act only for its own run.
-- **Encrypted vault.** OAuth tokens and API keys are Fernet-encrypted at
-  rest; the key lives only in an environment variable.
-- **Known gaps (tracked, not yet fixed):** the Gemini API key is currently
-  passed to the sandbox as an environment variable — it should be proxied
-  through the backend like MCP calls are. The live-view (VNC) has no auth.
-  The sandbox has no egress restriction. See the security backlog.
-
----
-
-## 8. Design principles
-
-- **The Plan is the contract.** Every component produces or consumes a Plan;
-  changing one component doesn't ripple to others.
+- **The Plan is the contract.** Components couple to the Plan, not to each
+  other — change one without rippling the rest.
 - **One implementation per concern.** Interfaces exist to allow swapping
-  (LLM provider, sandbox runner, database), but exactly one implementation
-  is active — no dead alternatives.
+  (LLM provider, sandbox runner, DB), but exactly one is active — no dead
+  alternatives carried as debt.
 - **No layer reaches around another.** The API never touches SQL directly;
   the sandbox never touches a credential. That discipline is what keeps the
-  system sound.
-- **Config, not code, changes between environments.** Deploying is setting
-  environment variables, not editing source.
+  system sound as it grows.
+- **Config, not code, changes between environments.** Dev → prod is setting
+  environment variables (`PUBLIC_BACKEND_BASE_URL`, `DATABASE_URL`, …), never
+  editing source.
+
+---
+
+## 9 · Known limitations (honest list)
+
+- **Single-user.** Everything runs as one default user today; real
+  multi-user auth and per-user data scoping are not yet built.
+- **No frontend yet.** Interaction is via CLI scripts and curl; a dashboard
+  is on the roadmap.
+- **Plans are create-only.** No update/versioning endpoint yet.
+- **Free-tier LLM is a real constraint.** Iteration speed is gated by the
+  20-calls/day free Gemini cap until billing is enabled.
+- **CAPTCHA is an explicit non-goal.** The agent pauses and hands off; it
+  never attempts to solve one.
