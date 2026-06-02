@@ -13,6 +13,7 @@ execute doesn't have its token expire mid-call.
 """
 from __future__ import annotations
 
+import logging
 import time
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -26,6 +27,8 @@ from app.services.vault import (
     encrypt_payload,
     get_credential_row,
 )
+
+log = logging.getLogger(__name__)
 
 
 REFRESH_BUFFER_SECONDS = 60
@@ -51,12 +54,23 @@ async def get_valid_oauth_credential(
 
     secret = decrypt_payload(row.secret_ciphertext)
     expires_at = secret.get("expires_at")
+    now = time.time()
+
+    log.info(
+        "oauth credential check: user=%s provider=%s expires_at=%s now=%.0f fresh=%s",
+        user_id, provider, expires_at, now,
+        expires_at is not None and now < expires_at - REFRESH_BUFFER_SECONDS,
+    )
 
     if expires_at is None:
-        # Never-expiring token (rare). Return as-is.
-        return secret
-
-    if time.time() < expires_at - REFRESH_BUFFER_SECONDS:
+        # expires_at missing means the token was stored before the
+        # token_lifetime_seconds fallback was added. Treat as expired so the
+        # first use after deploy triggers a refresh and stores a proper value.
+        log.warning(
+            "oauth %s/%s: expires_at is None (legacy credential) — forcing refresh",
+            user_id, provider,
+        )
+    elif now < expires_at - REFRESH_BUFFER_SECONDS:
         # Still fresh enough.
         return secret
 
@@ -75,11 +89,17 @@ async def get_valid_oauth_credential(
             f"{provider} client_id/secret not configured in backend .env"
         )
 
+    log.info("oauth %s/%s: refreshing access token", user_id, provider)
     new_tokens = await refresh_access_token(
         provider_cfg,
         client_id=client_id,
         client_secret=client_secret,
         refresh_token=refresh_tok,
+    )
+    log.info(
+        "oauth %s/%s: refresh succeeded, new expires_at=%.0f",
+        user_id, provider,
+        new_tokens.expires_at_ts(provider_cfg.token_lifetime_seconds) or 0,
     )
 
     # Update the stored credential. Note: some providers (Google) won't issue
@@ -87,11 +107,12 @@ async def get_valid_oauth_credential(
     updated = secret.copy()
     updated["access_token"] = new_tokens.access_token
     updated["refresh_token"] = new_tokens.refresh_token or refresh_tok
-    updated["expires_at"] = new_tokens.expires_at_ts()
+    updated["expires_at"] = new_tokens.expires_at_ts(provider_cfg.token_lifetime_seconds)
     updated["token_type"] = new_tokens.token_type
     if new_tokens.scope:
         updated["scope"] = new_tokens.scope
 
     row.secret_ciphertext = encrypt_payload(updated)
     await session.flush()
+    log.info("oauth %s/%s: updated credential flushed to session", user_id, provider)
     return updated

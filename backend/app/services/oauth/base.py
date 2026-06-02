@@ -46,6 +46,10 @@ class OAuthProvider:
     # Provider-specific public metadata to extract from token response
     # and store on the Credential row. e.g. Salesforce returns instance_url.
     public_metadata_keys: list[str] = field(default_factory=list)
+    # Fallback token lifetime (seconds) for providers that don't return
+    # expires_in in the token response (e.g. Salesforce returns issued_at
+    # instead). Used when expires_in is absent.
+    token_lifetime_seconds: int | None = None
 
 
 @dataclass
@@ -58,17 +62,25 @@ class TokenResponse:
     scope: str | None = None
     raw: dict[str, Any] = field(default_factory=dict)
 
-    def expires_at_ts(self) -> int | None:
-        if self.expires_in is None:
+    def expires_at_ts(self, fallback_lifetime: int | None = None) -> int | None:
+        """Unix timestamp when the token expires.
+
+        Uses expires_in from the token response, falling back to
+        fallback_lifetime (from OAuthProvider.token_lifetime_seconds) for
+        providers like Salesforce that return issued_at instead of expires_in.
+        Returns None only when both are absent (token treated as permanent).
+        """
+        lifetime = self.expires_in if self.expires_in is not None else fallback_lifetime
+        if lifetime is None:
             return None
-        return int(time.time()) + self.expires_in
+        return int(time.time()) + lifetime
 
     def to_secret_blob(self, provider: OAuthProvider) -> dict[str, Any]:
         """The shape stored in the encrypted credential."""
         blob = {
             "access_token": self.access_token,
             "refresh_token": self.refresh_token,
-            "expires_at": self.expires_at_ts(),
+            "expires_at": self.expires_at_ts(provider.token_lifetime_seconds),
             "token_type": self.token_type,
             "scope": self.scope,
         }
@@ -80,11 +92,14 @@ class TokenResponse:
 
     def to_public_metadata(self, provider: OAuthProvider) -> dict[str, Any]:
         """Non-secret data we expose to dashboards (e.g. Salesforce org URL)."""
-        return {
+        meta = {
             key: self.raw[key]
             for key in provider.public_metadata_keys
             if key in self.raw
         }
+        if self.scope is not None:
+            meta["scope"] = self.scope
+        return meta
 
 
 # ---------------------------------------------------------------------------

@@ -32,6 +32,9 @@ def _salesforce() -> OAuthProvider:
             "prompt": "login consent",       # always show approval screen — easy demo
         },
         public_metadata_keys=["instance_url", "id", "signature"],
+        # Salesforce returns issued_at (ms timestamp) instead of expires_in.
+        # Connected App sessions default to 2 hours; use that as the fallback.
+        token_lifetime_seconds=7200,
     )
 
 
