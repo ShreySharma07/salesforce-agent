@@ -1,4 +1,4 @@
-# AI Work Automation Agent Platform
+# RAI Work Automation Agent Platform
 
 An autonomous agent platform that watches a screen recording of a repetitive
 task once, generates an executable plan, and runs that plan on its own inside
@@ -15,7 +15,7 @@ leads/contacts), but the architecture is general — any web UI task.
 
 1. You record yourself doing a task once (a screen recording).
 2. The platform turns that recording into a structured **Plan**.
-3. You trigger the Plan; it runs autonomously in a fresh, isolated sandbox.
+3. You trigger the Plan, it runs autonomously in a fresh, isolated sandbox.
 4. The agent drives a real browser, reasoning step by step, and can call
    external services (e.g. Salesforce) through a secure tool layer.
 5. You can watch it work live, and inspect a full reasoning trace afterward.
@@ -59,7 +59,7 @@ The system is split into two processes with a strict trust boundary:
 Two security properties worth calling out:
 
 - **LLM key never enters the sandbox.** The sandbox's LLM calls are proxied
-  through the backend (`/sandbox/llm/generate`); the API key lives only on
+  through the backend (`/sandbox/llm/generate`) the API key lives only on
   the backend.
 - **Salesforce token never enters the sandbox.** The agent logs into
   Salesforce via the OAuth2 `singleaccess` endpoint, which mints a one-time
@@ -285,7 +285,7 @@ curl -s http://localhost:8001/runs/<run_id> | python -m json.tool
   restart; the sandbox you must rebuild.
 - **"Salesforce not connected" despite being connected** — the data lives in
   the SQLite DB, not the `.local_storage/*.json` files. Editing files does
-  nothing; the API reads the DB. Use the API/DB as the source of truth.
+  nothing, the API reads the DB. Use the API/DB as the source of truth.
 - **Out of LLM quota / runs aborting** — the free Gemini tier is 20 calls/day
   per project. A multi-step run can exhaust it. Enable billing for real
   iteration.
