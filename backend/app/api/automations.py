@@ -28,6 +28,7 @@ from app.schemas.run import Run, RunStatus, RunTrigger, StepExecution
 from app.services.run_repo import get_repository
 from app.services.sandbox import SpawnConfig, get_sandbox_runner
 from app.services.vault import get_credential_row
+from app.services.memory.integration import prime_steps, reflect_after_run
 
 import logging
 
@@ -201,11 +202,20 @@ async def _execute_automation_in_sandbox(run_id: str) -> None:
         run.status = RunStatus.RUNNING
         await repo.save_run(run)
 
+        # MEMORY (priming): build per-step hints from past runs. Best-effort —
+        # never let memory lookup break a run.
+        memory_hints: dict[str, str] = {}
+        try:
+            memory_hints = await prime_steps(user_id=user_id, plan=plan)
+        except Exception as e:
+            log.warning("memory: priming failed for run %s: %s", run.id, e)
+
         result = await runner.execute_plan(
             handle,
             plan.model_dump(mode="json"),
             max_steps=settings.sandbox_default_max_steps,
             max_seconds=settings.sandbox_default_max_seconds,
+            memory_hints=memory_hints,
         )
 
         # Translate sandbox response into our Run model
@@ -280,6 +290,18 @@ async def _execute_automation_in_sandbox(run_id: str) -> None:
             auto.successful_runs += 1
         auto.last_run_at = run.finished_at
         await repo.save_automation(auto)
+
+        # MEMORY (reflection): learn from this run — distill procedure,
+        # capture episodes, emit lessons. Best-effort; never breaks the run.
+        run_succeeded = run.status == RunStatus.COMPLETED
+        await reflect_after_run(
+            user_id=user_id,
+            plan=plan,
+            step_executions=run.step_executions,
+            interventions=run.interventions,
+            run_id=run.id,
+            run_succeeded=run_succeeded,
+        )
 
     except Exception as e:
         import traceback

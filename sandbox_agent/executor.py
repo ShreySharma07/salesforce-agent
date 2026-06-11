@@ -225,6 +225,7 @@ def _run_step(page: Page, llm: GeminiClient, step: Step, req: RunRequest) -> Ste
     if mode == ExecutionMode.BROWSER:
         outcome = browser_mode.execute_step(
             page, llm, intent,
+            memory_hint=req.memory_hints.get(step.id, ""),
             max_iterations=req.max_iterations_per_step,
             max_seconds=req.max_seconds_per_step,
         )

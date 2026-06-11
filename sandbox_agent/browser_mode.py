@@ -140,6 +140,7 @@ def execute_step(
     llm: GeminiClient,
     step_intent: str,
     *,
+    memory_hint: str = "",
     max_iterations: int = 12,
     max_seconds: float = 180.0,
     screenshot_dir: str | None = None,
@@ -189,8 +190,10 @@ def execute_step(
         screenshot_ref = _maybe_save_screenshot(screenshot, screenshot_dir, iteration)
 
         # ---------- REASON ----------
-        prompt = "\n\n".join([
-            f"GOAL: {step_intent}",
+        prompt_parts = [f"GOAL: {step_intent}"]
+        if memory_hint:
+            prompt_parts.append(memory_hint)
+        prompt_parts += [
             f"URL: {url}",
             f"TITLE: {title}",
             "ELEMENTS:",
@@ -198,7 +201,8 @@ def execute_step(
             "TRAJECTORY (every previous turn this step):",
             _render_trajectory(trace),
             "Emit one action as JSON.",
-        ])
+        ]
+        prompt = "\n\n".join(prompt_parts)
 
         try:
             response = llm.generate(

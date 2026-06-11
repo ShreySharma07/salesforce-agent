@@ -36,11 +36,55 @@ logging.basicConfig(
 log = logging.getLogger("backend")
 
 
+def _is_migration_current() -> bool:
+    """Read-only pre-check: is the DB already at the Alembic head revision?
+
+    Uses a synchronous sqlite3 read (no write lock) so a running backend
+    holding the database open does not cause a 2-minute busy-timeout wait.
+    Falls back to False on any error so the subprocess still runs in
+    ambiguous situations.
+    """
+    import sqlite3 as _sqlite3
+    from alembic.config import Config as AlembicConfig
+    from alembic.script import ScriptDirectory
+
+    try:
+        settings = get_settings()
+        if not settings.database_url.startswith("sqlite"):
+            return False  # Postgres: always let alembic decide
+        db_path = settings.database_url.split("///", 1)[-1]
+        if not db_path or not Path(db_path).exists():
+            return False  # DB not created yet
+
+        backend_dir = Path(__file__).resolve().parent.parent
+        cfg = AlembicConfig(str(backend_dir / "alembic.ini"))
+        heads = set(ScriptDirectory.from_config(cfg).get_heads())
+        if not heads:
+            return False
+
+        con = _sqlite3.connect(db_path, timeout=1.0)
+        try:
+            row = con.execute("SELECT version_num FROM alembic_version").fetchone()
+        except _sqlite3.OperationalError:
+            return False  # table missing — DB is new
+        finally:
+            con.close()
+
+        return row is not None and row[0] in heads
+    except Exception:
+        return False  # any error → let the subprocess sort it out
+
+
 async def _run_migrations() -> None:
     """Run Alembic migrations in a subprocess to eliminate the SQLAlchemy 2 +
     aiosqlite connection-state deadlock that occurs when alembic.command.upgrade()
     runs inside the same process that later opens async sessions."""
     settings = get_settings()
+
+    if _is_migration_current():
+        log.info("Migrations up to date")
+        return
+
     log.info("Running database migrations (in subprocess)")
     storage_root = Path(settings.local_storage_root)
     storage_root.mkdir(parents=True, exist_ok=True)

@@ -61,6 +61,8 @@ class RunRequest(BaseModel):
     """HTTP body for POST /run."""
     model_config = ConfigDict(extra="ignore")
 
+    memory_hints: dict[str, str] = Field(default_factory=dict)
+
     plan: Plan
     initial_url: str | None = Field(
         None,

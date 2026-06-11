@@ -130,11 +130,13 @@ class LocalDockerRunner(SandboxRunner):
         *,
         max_steps: int = 50,
         max_seconds: int = 600,
+        memory_hints: dict[str, str] | None = None,
     ) -> dict:
         body = {
             "plan": plan_dict,
             "max_steps": max_steps,
             "max_seconds": max_seconds,
+            "memory_hints": memory_hints or {},
         }
         # Use a generous client timeout slightly larger than the run cap
         # so the sandbox can complete its own bookkeeping.

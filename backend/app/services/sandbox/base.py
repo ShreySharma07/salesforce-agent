@@ -82,6 +82,7 @@ class SandboxRunner(ABC):
         *,
         max_steps: int = 50,
         max_seconds: int = 600,
+        memory_hints: dict[str, str] | None = None,
     ) -> dict:
         """POST plan to the sandbox /run endpoint. Returns the run result."""
 
