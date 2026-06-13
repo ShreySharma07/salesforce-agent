@@ -144,10 +144,16 @@ def build_priming_text(proc: Procedure) -> str:
         f"against the live page and adapt if the UI differs:"
     )
     for i, s in enumerate(proc.steps, 1):
-        arg_str = ""
-        if s.action_args:
-            # Keep args compact; don't leak long values.
-            keys = ", ".join(sorted(s.action_args.keys()))
+        # The semantic target descriptor (from grounding) is UI structure,
+        # not user data — rendering it is the point of stable identity:
+        # "click button 'New' in header" is replayable; "(ref)" is not.
+        target = s.action_args.get("target", "") if s.action_args else ""
+        arg_str = f" {target}" if target else ""
+        if not target and s.action_args:
+            # No descriptor (pre-grounding trace) — fall back to key names,
+            # still never leaking values.
+            keys = ", ".join(k for k in sorted(s.action_args.keys())
+                             if k not in ("text", "value"))
             arg_str = f" ({keys})" if keys else ""
         intent = f" \u2014 {s.intent}" if s.intent else ""
         lines.append(f"  {i}. {s.action}{arg_str}{intent}")

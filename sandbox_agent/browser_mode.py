@@ -22,7 +22,11 @@ from typing import Any
 
 from playwright.sync_api import Page, TimeoutError as PWTimeoutError
 
-from sandbox_agent.grounding import extract_from_page, render_for_prompt
+from sandbox_agent.grounding import (
+    extract_from_page,
+    render_for_prompt,
+    annotate_screenshot,
+)
 from sandbox_agent.llm_client import GeminiClient
 from sandbox_agent.schemas import LoopIteration
 
@@ -187,6 +191,11 @@ def execute_step(
             time.sleep(1)
             continue
 
+        # Set-of-Mark: draw numbered boxes onto the screenshot so the marks
+        # in the image match the #refs in ELEMENTS. Degrades to the raw
+        # screenshot if annotation fails.
+        screenshot = annotate_screenshot(screenshot, elements)
+
         screenshot_ref = _maybe_save_screenshot(screenshot, screenshot_dir, iteration)
 
         # ---------- REASON ----------
@@ -196,7 +205,7 @@ def execute_step(
         prompt_parts += [
             f"URL: {url}",
             f"TITLE: {title}",
-            "ELEMENTS:",
+            "ELEMENTS (the numbered boxes drawn on the screenshot correspond to these #refs):",
             elements_text,
             "TRAJECTORY (every previous turn this step):",
             _render_trajectory(trace),
@@ -299,7 +308,7 @@ def execute_step(
 
         # ---------- ACT ----------
         try:
-            observation = _execute_action(page, kind, action)
+            observation = _execute_action(page, kind, action, grounding=elements)
             err = None
         except Exception as e:
             observation = ""
@@ -319,19 +328,61 @@ def execute_step(
 # Action execution
 # ---------------------------------------------------------------------------
 
-def _execute_action(page: Page, kind: str, action: dict) -> str:
+def _execute_action(page: Page, kind: str, action: dict, grounding=None) -> str:
     """Execute one action, return a compact text observation describing
-    what happened (fed back into the next turn's trajectory)."""
+    what happened (fed back into the next turn's trajectory).
+
+    D2: when grounding is available, the element's semantic descriptor is
+    written back into action_args (action["target"]) so the persisted trace
+    — and any procedure distilled from it — records "click button 'New' in
+    header", not a meaningless ref int.
+    D5: if the locator-based action fails (Lightning re-renders detach
+    nodes), fall back to clicking the element's box center coordinates.
+    """
+    def _el(ref: int):
+        return grounding.by_ref(ref) if grounding is not None else None
+
+    def _describe(ref: int) -> str:
+        el = _el(ref)
+        return el.descriptor if el else f"element #{ref}"
+
+    def _record_target(ref: int) -> None:
+        el = _el(ref)
+        if el is not None:
+            action["target"] = el.descriptor
+            action["stable_id"] = el.stable_id
+
     if kind == "click":
         ref = int(action["ref"])
-        page.locator(f'[data-agent-ref="{ref}"]').first.click(timeout=5000)
-        return f"clicked element #{ref}"
+        _record_target(ref)
+        try:
+            page.locator(f'[data-agent-ref="{ref}"]').first.click(timeout=5000)
+            return f"clicked {_describe(ref)} (#{ref})"
+        except Exception as loc_err:
+            el = _el(ref)
+            if el is not None and el.w > 0 and el.h > 0:
+                # Coordinate fallback: click the box center.
+                page.mouse.click(el.x + el.w / 2, el.y + el.h / 2)
+                return (f"clicked {_describe(ref)} (#{ref}) via coordinates "
+                        f"(locator failed: {type(loc_err).__name__})")
+            raise
 
     if kind == "fill":
         ref = int(action["ref"])
         text = str(action.get("text", ""))
-        page.locator(f'[data-agent-ref="{ref}"]').first.fill(text, timeout=5000)
-        return f"filled element #{ref} with {len(text)} chars"
+        _record_target(ref)
+        try:
+            page.locator(f'[data-agent-ref="{ref}"]').first.fill(text, timeout=5000)
+            return f"filled {_describe(ref)} (#{ref}) with {len(text)} chars"
+        except Exception as loc_err:
+            el = _el(ref)
+            if el is not None and el.w > 0 and el.h > 0:
+                # Fallback: focus by coordinate click, then type.
+                page.mouse.click(el.x + el.w / 2, el.y + el.h / 2)
+                page.keyboard.type(text)
+                return (f"filled {_describe(ref)} (#{ref}) via coordinates "
+                        f"(locator failed: {type(loc_err).__name__})")
+            raise
 
     if kind == "press":
         key = str(action.get("key", ""))
