@@ -97,6 +97,8 @@ class Settings(BaseSettings):
     # ----- Default user (single-user mode) -----
     default_user_id: str = "user_local"
 
+    auth_dev_mode: bool = True
+
     # ----- Budget defaults -----
     default_max_model_calls_per_run: int = 50
     default_max_usd_per_run: float = 2.00

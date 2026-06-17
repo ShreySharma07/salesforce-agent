@@ -20,7 +20,7 @@ from datetime import datetime, timedelta
 from typing import Protocol
 
 from app.schemas.auth import Session, User, UserStatus
-from app.services.auth.passwords import hash_password, verify_password
+from app.services.oauth.passwords import hash_password, verify_password
 
 
 SESSION_TTL = timedelta(days=14)

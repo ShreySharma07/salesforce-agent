@@ -27,6 +27,7 @@ from app.api import automations, credentials, mcp, oauth, plans, runs, sandbox_f
 from app.config import get_settings
 from app.db.base import close_engine, get_sessionmaker
 from app.db.models import User
+from app.api import automations, credentials, mcp, oauth, plans, runs, sandbox_frontdoor, sandbox_llm, auth_routes
 
 
 logging.basicConfig(
@@ -197,6 +198,7 @@ def create_app() -> FastAPI:
 
 app = create_app()
 
+app.include_router(auth_routes.router)
 
 if __name__ == "__main__":
     import uvicorn

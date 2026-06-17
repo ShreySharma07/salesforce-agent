@@ -18,13 +18,16 @@ import secrets
 import uuid
 from datetime import datetime, timedelta
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Depends
 from pydantic import BaseModel, Field
 
 from app.config import get_settings
 from app.db.base import get_sessionmaker
 from app.schemas.automation import Automation, AutomationStatus
 from app.schemas.run import Run, RunStatus, RunTrigger, StepExecution
+from app.schemas.auth import User
+from app.api.deps import get_current_user, get_scoped_repo_dep
+from app.services.scoping import ScopedRepo
 from app.services.run_repo import get_repository
 from app.services.sandbox import SpawnConfig, get_sandbox_runner
 from app.services.vault import get_credential_row
@@ -56,32 +59,36 @@ def _backend_url_for_sandbox() -> str:
 class CreateAutomationBody(BaseModel):
     name: str
     plan_id: str
-    user_id: str = Field(default_factory=lambda: get_settings().default_user_id)
     description: str | None = None
+    # NOTE: no user_id here — the owner is the AUTHENTICATED user, never a
+    # client-supplied value (preventing a user from creating data under
+    # someone else's id).
 
 
 @router.get("", response_model=list[Automation])
-async def list_automations():
-    return await get_repository().list_automations()
+async def list_automations(repo: ScopedRepo = Depends(get_scoped_repo_dep)):
+    return await repo.list_automations()
 
 
 @router.get("/{automation_id}", response_model=Automation)
-async def get_automation(automation_id: str):
-    auto = await get_repository().get_automation(automation_id)
+async def get_automation(automation_id: str,
+                         repo: ScopedRepo = Depends(get_scoped_repo_dep)):
+    auto = await repo.get_automation(automation_id)
     if auto is None:
         raise HTTPException(404, f"automation {automation_id} not found")
     return auto
 
 
 @router.post("", response_model=Automation)
-async def create_automation(body: CreateAutomationBody):
-    repo = get_repository()
+async def create_automation(body: CreateAutomationBody,
+                            user: User = Depends(get_current_user),
+                            repo: ScopedRepo = Depends(get_scoped_repo_dep)):
     plan = await repo.get_plan(body.plan_id)
     if plan is None:
         raise HTTPException(404, f"plan {body.plan_id} not found")
     auto = Automation(
         id=f"auto_{uuid.uuid4().hex[:10]}",
-        user_id=body.user_id,
+        user_id=user.id,                 # owner = authenticated user
         name=body.name,
         description=body.description,
         plan_id=plan.id,
@@ -96,13 +103,12 @@ async def create_automation(body: CreateAutomationBody):
 async def run_automation(
     automation_id: str,
     background: BackgroundTasks,
+    user: User = Depends(get_current_user),
+    repo: ScopedRepo = Depends(get_scoped_repo_dep),
 ):
     """Spawn a sandbox, execute the plan inside it, return a Run record.
     The actual execution happens asynchronously - this endpoint returns
     quickly with the live_view_url so the user can watch."""
-    settings = get_settings()
-    repo = get_repository()
-
     auto = await repo.get_automation(automation_id)
     if auto is None:
         raise HTTPException(404, f"automation {automation_id} not found")
@@ -115,6 +121,7 @@ async def run_automation(
         automation_id=auto.id,
         plan_version=plan.version,
         triggered_by=RunTrigger.MANUAL,
+        triggered_by_user=user.id,
         status=RunStatus.PROVISIONING,
     )
     await repo.save_run(run)
@@ -140,11 +147,14 @@ async def _execute_automation_in_sandbox(run_id: str) -> None:
     if run is None:
         return  # shouldn't happen, but defensive
     auto = await repo.get_automation(run.automation_id)
+    # Owner for this run (background task runs detached, derives from the
+    # automation it loads). Used to stamp the run row and to scope memory.
+    user_id = (auto.user_id if auto else None) or settings.default_user_id
     plan = await repo.get_plan(auto.plan_id) if auto else None
     if plan is None:
         run.status = RunStatus.FAILED
         run.error = "linked plan disappeared"
-        await repo.save_run(run)
+        await repo.save_run(run, user_id=user_id)
         return
 
     try:
@@ -152,7 +162,7 @@ async def _execute_automation_in_sandbox(run_id: str) -> None:
         # plaintext is sent once to the sandbox and never stored.
         run_token = secrets.token_urlsafe(32)
         run.mcp_token_hash = hashlib.sha256(run_token.encode()).hexdigest()
-        await repo.save_run(run)
+        await repo.save_run(run, user_id=user_id)
 
         # Build extra env vars the sandbox may need.
         extra_env: dict[str, str] = {}
@@ -161,7 +171,6 @@ async def _execute_automation_in_sandbox(run_id: str) -> None:
         # connected (OAuth credential in the vault). This is a backend
         # decision — it doesn't depend on what the plan declares.
         _FRONTDOOR_PROVIDERS = ["salesforce"]
-        user_id = auto.user_id or settings.default_user_id
         async with get_sessionmaker()() as session:
             for provider in _FRONTDOOR_PROVIDERS:
                 row = await get_credential_row(session, user_id=user_id, provider=provider)
@@ -186,7 +195,7 @@ async def _execute_automation_in_sandbox(run_id: str) -> None:
         run.sandbox_id = handle.sandbox_id
         run.live_view_url = handle.live_view_url
         run.started_at = datetime.utcnow()
-        await repo.save_run(run)
+        await repo.save_run(run, user_id=user_id)
 
         healthy = await runner.wait_healthy(handle, timeout_seconds=60)
         if not healthy:
@@ -196,11 +205,11 @@ async def _execute_automation_in_sandbox(run_id: str) -> None:
                 f"sandbox failed to become healthy within 60s. "
                 f"Container logs (last lines):\n{logs[-3000:]}"
             )
-            await repo.save_run(run)
+            await repo.save_run(run, user_id=user_id)
             return
 
         run.status = RunStatus.RUNNING
-        await repo.save_run(run)
+        await repo.save_run(run, user_id=user_id)
 
         # MEMORY (priming): build per-step hints from past runs. Best-effort —
         # never let memory lookup break a run.
@@ -289,7 +298,7 @@ async def _execute_automation_in_sandbox(run_id: str) -> None:
         if run.status in (RunStatus.COMPLETED, RunStatus.COMPLETED_WITH_FAILURES):
             auto.successful_runs += 1
         auto.last_run_at = run.finished_at
-        await repo.save_automation(auto)
+        await repo.save_automation(auto, user_id=user_id)
 
         # MEMORY (reflection): learn from this run — distill procedure,
         # capture episodes, emit lessons. Best-effort; never breaks the run.
@@ -309,7 +318,7 @@ async def _execute_automation_in_sandbox(run_id: str) -> None:
         run.error = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
         run.finished_at = datetime.utcnow()
     finally:
-        await repo.save_run(run)
+        await repo.save_run(run, user_id=user_id)
         if handle is not None:
             try:
                 await runner.teardown(handle)
