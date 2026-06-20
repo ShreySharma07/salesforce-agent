@@ -1,20 +1,15 @@
-// app/(app)/layout.tsx
-// Auth guard for the whole app island. Calls /auth/me; while loading shows a
-// quiet state; if unauthenticated, redirects to /login. Every nested route
-// (dashboard, runs, settings) is protected by sitting under this layout.
-
+// app/(app)/layout.tsx — auth guard + light-themed app shell (Repliq style).
 "use client";
 
 import { useEffect } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, usePathname } from "next/navigation";
+import Link from "next/link";
 import { useUser, useLogout } from "@/lib/auth";
+import { T } from "@/lib/theme";
 
-export default function AppLayout({
-  children,
-}: {
-  children: React.ReactNode;
-}) {
+export default function AppLayout({ children }: { children: React.ReactNode }) {
   const router = useRouter();
+  const pathname = usePathname();
   const { data: user, isLoading } = useUser();
   const logout = useLogout();
 
@@ -24,105 +19,51 @@ export default function AppLayout({
 
   if (isLoading || user === null) {
     return (
-      <div className="boot">
-        <span className="dot dot-live" />
-        <span className="mono text-dim">authenticating…</span>
-        <style jsx>{`
-          .boot {
-            min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            gap: 10px;
-            font-size: 14px;
-          }
-        `}</style>
+      <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", gap: 10, background: T.pageBg, color: T.body, fontSize: 14 }}>
+        <span style={{ width: 8, height: 8, borderRadius: "50%", background: "#22c55e", animation: "blink 1.6s ease-in-out infinite" }} />
+        authenticating…
       </div>
     );
   }
 
+  const nav = [
+    { href: "/dashboard", label: "Automations" },
+    { href: "/plans", label: "Plans" },
+  ];
+
   return (
-    <div className="shell">
-      <header className="topbar glass">
-        <div className="brand display">
-          <span className="dot dot-live" /> agent
-        </div>
-        <nav className="nav mono">
-          <a href="/dashboard">Automations</a>
-          <a href="/plans">Plans</a>
+    <div style={{ minHeight: "100vh", background: T.pageBg }}>
+      <header style={{ position: "sticky", top: 0, zIndex: 50, display: "flex", alignItems: "center", justifyContent: "space-between", padding: "16px 32px", background: "rgba(255,255,255,0.72)", backdropFilter: "blur(18px)", WebkitBackdropFilter: "blur(18px)", borderBottom: "1px solid rgba(11,18,51,0.06)" }}>
+        <Link href="/dashboard" style={{ display: "flex", alignItems: "center", gap: 11, textDecoration: "none" }}>
+          <span style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 30, height: 30, borderRadius: 9, background: T.grad }}>
+            <span style={{ width: 9, height: 9, borderRadius: "50%", background: "#fff" }} />
+          </span>
+          <span style={{ fontSize: 19, fontWeight: 700, letterSpacing: "-0.03em", color: T.ink }}>Repliq</span>
+        </Link>
+
+        <nav style={{ display: "flex", gap: 28 }}>
+          {nav.map((n) => {
+            const active = pathname?.startsWith(n.href);
+            return (
+              <Link key={n.href} href={n.href} style={{ fontSize: 15, fontWeight: 500, color: active ? T.violet : T.ink2, textDecoration: "none" }}>
+                {n.label}
+              </Link>
+            );
+          })}
         </nav>
-        <div className="user">
-          <span className="text-dim mono">{user.email}</span>
+
+        <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+          <span style={{ fontSize: 13.5, color: T.body }}>{user.email}</span>
           <button
-            onClick={async () => {
-              await logout.mutateAsync();
-              router.replace("/login");
-            }}
+            onClick={async () => { await logout.mutateAsync(); router.replace("/login"); }}
+            style={{ background: "#fff", border: "1px solid rgba(11,18,51,0.12)", color: T.ink2, borderRadius: 999, padding: "7px 14px", fontSize: 13.5, cursor: "pointer", fontWeight: 600 }}
           >
             Sign out
           </button>
         </div>
       </header>
 
-      <main className="content">{children}</main>
-
-      <style jsx>{`
-        .shell {
-          min-height: 100vh;
-          padding: 20px;
-          max-width: 1100px;
-          margin: 0 auto;
-        }
-        .topbar {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          padding: 14px 20px;
-          margin-bottom: 24px;
-        }
-        .brand {
-          display: flex;
-          align-items: center;
-          gap: 8px;
-          font-size: 15px;
-          letter-spacing: 0.04em;
-        }
-        .nav {
-          display: flex;
-          gap: 22px;
-          font-size: 13px;
-        }
-        .nav a {
-          color: var(--text-dim);
-          text-decoration: none;
-          transition: color 0.15s;
-        }
-        .nav a:hover {
-          color: var(--text);
-        }
-        .user {
-          display: flex;
-          align-items: center;
-          gap: 14px;
-          font-size: 13px;
-        }
-        .user button {
-          background: none;
-          border: 1px solid var(--panel-border);
-          color: var(--text-dim);
-          border-radius: 8px;
-          padding: 6px 12px;
-          font-size: 13px;
-          cursor: pointer;
-          transition:
-            color 0.15s,
-            border-color 0.15s;
-        }
-        .user button:hover {
-          color: var(--text);
-          border-color: var(--accent);
-        }
-      `}</style>
+      <main style={{ maxWidth: 1100, margin: "0 auto", padding: "40px 24px 80px" }}>{children}</main>
     </div>
   );
 }

@@ -58,7 +58,7 @@ def upgrade() -> None:
                 "INSERT INTO users (id, email, name, is_active, created_at) "
                 "VALUES (:id, :email, :name, 1, CURRENT_TIMESTAMP)"
             ),
-            {"id": default_uid, "email": "dev@local", "name": "Default User"},
+            {"id": default_uid, "email": "dev@local.dev", "name": "Default User"},
         )
 
     # Backfill NULL owners on plans / automations / runs.
