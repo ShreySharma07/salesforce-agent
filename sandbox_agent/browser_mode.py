@@ -54,7 +54,7 @@ Actions:
 
 Rules:
   - Refer to elements only by the # ref shown in ELEMENTS. Never invent a ref.
-  - Use `dismiss_obstruction` when a modal, popup, overlay, or cookie banner is in the way — pick the ref of its close/accept control.
+  - Use `dismiss_obstruction` when a modal, popup, overlay, toast, or cookie banner is in the way — pick the ref of its close/accept control. This action escalates automatically: it tries a normal click, then a FORCE click that bypasses an intercepting overlay, then hides the element as a last resort. So if a toast or banner keeps blocking clicks (e.g. "intercepts pointer events"), use `dismiss_obstruction` on its close button rather than repeatedly trying to click through it.
   - Use `captcha_detected` if you see a CAPTCHA, "verify you are human", or similar bot-check. Do NOT try to solve it.
   - Use `open_app` when the task requires a connected app like Salesforce. This lands you ALREADY LOGGED IN on the app's home page. Do NOT navigate to the app's login page or try to log in yourself — emit `open_app` with the provider name and you will arrive authenticated. After that, navigate the app's UI normally.
   - Emit `done` only when the GOAL is clearly accomplished, citing concrete on-page evidence.
@@ -110,6 +110,59 @@ def wait_for_stable(page: Page, *, settle_ms: int = 400) -> None:
 # ---------------------------------------------------------------------------
 # Trajectory rendering — full history, compact
 # ---------------------------------------------------------------------------
+
+def _detect_stuck(trace: list[LoopIteration]) -> str:
+    """Look at recent history and, if the agent is spinning, return an
+    escalation nudge to inject into the next prompt. Empty string when fine.
+
+    Two stuck patterns:
+      A. Same action+ref repeated with an error/failure 2+ times in a row.
+      B. 3+ of the last 4 iterations made no progress (errors, parse failures,
+         or observations starting with FAILED/CANNOT/WARNING).
+    """
+    if len(trace) < 2:
+        return ""
+
+    def _failed(it: "LoopIteration") -> bool:
+        if it.error:
+            return True
+        obs = (it.observation or "")
+        return obs.startswith(("FAILED", "CANNOT", "WARNING")) or "could not parse" in obs
+
+    last = trace[-1]
+    prev = trace[-2]
+
+    # Pattern A: identical action+args repeated and not working.
+    same_action = (last.action == prev.action and last.action_args == prev.action_args)
+    if same_action and _failed(last) and _failed(prev):
+        target = ""
+        if isinstance(last.action_args, dict) and "ref" in last.action_args:
+            target = f" on #{last.action_args.get('ref')}"
+        return (
+            f"ESCALATION: you have now tried `{last.action}`{target} twice and it "
+            f"failed both times. DO NOT repeat it. An element may be covered by an "
+            f"overlay/toast intercepting clicks. Try, in order: (1) "
+            f"`dismiss_obstruction` with force on the blocking overlay's close "
+            f"button, (2) a DIFFERENT element or ref, (3) `navigate` directly to "
+            f"the target URL, or (4) `scroll` to reveal a different control. "
+            f"`dismiss_obstruction` now uses a force-click and, if that fails, "
+            f"hides the blocking element — so prefer it for stubborn toasts/banners."
+        )
+
+    # Pattern B: broad lack of progress over the recent window.
+    window = trace[-4:]
+    if len(window) >= 3:
+        failures = sum(1 for it in window if _failed(it))
+        if failures >= 3:
+            return (
+                "ESCALATION: the last several actions have not made progress. Stop "
+                "repeating the same approach. If an overlay/toast is blocking the "
+                "page, use `dismiss_obstruction` (it now force-clicks and will hide "
+                "a stubborn blocker). Otherwise change strategy entirely: navigate "
+                "directly to the target, or pick a clearly different element."
+            )
+    return ""
+
 
 def _render_trajectory(trace: list[LoopIteration]) -> str:
     """Render every past iteration as compact text. Screenshots are NOT
@@ -201,8 +254,11 @@ def execute_step(
             elements_text,
             "TRAJECTORY (every previous turn this step):",
             _render_trajectory(trace),
-            "Emit one action as JSON.",
         ]
+        _stuck_nudge = _detect_stuck(trace)
+        if _stuck_nudge:
+            prompt_parts.append(_stuck_nudge)
+        prompt_parts.append("Emit one action as JSON.")
         prompt = "\n\n".join(prompt_parts)
 
         try:
@@ -423,8 +479,58 @@ def _execute_action(page: Page, kind: str, action: dict) -> str:
 
     if kind == "dismiss_obstruction":
         ref = int(action["ref"])
-        page.locator(f'[data-agent-ref="{ref}"]').first.click(timeout=5000)
-        return f"dismissed obstruction via element #{ref}"
+        loc = page.locator(f'[data-agent-ref="{ref}"]').first
+        # Rung 1: a normal click on the close/accept control.
+        try:
+            loc.click(timeout=3000)
+            return f"dismissed obstruction via element #{ref}"
+        except Exception:
+            pass
+        # Rung 2: FORCE click — bypasses the actionability/pointer-intercept
+        # check, so a transparent overlay sitting on top no longer blocks the
+        # close button. This is the right override for Salesforce toasts whose
+        # close 'X' is covered by an intercepting layer.
+        try:
+            loc.click(force=True, timeout=3000)
+            return f"dismissed obstruction via element #{ref} (forced click)"
+        except Exception:
+            pass
+        # Rung 3 (LAST RESORT): hide the element. We HIDE (visibility:hidden +
+        # pointer-events:none), never remove() — hiding is reversible and far
+        # less likely to break Lightning's reactive framework than detaching a
+        # node it owns. This unblocks the page when the close button itself is
+        # unreachable.
+        try:
+            hidden = page.evaluate(
+                """(ref) => {
+                    const el = document.querySelector('[data-agent-ref="' + ref + '"]');
+                    if (!el) return false;
+                    // Hide the element and its nearest toast/dialog container,
+                    // so an overlay wrapper stops intercepting pointer events.
+                    const targets = [el];
+                    let p = el;
+                    for (let i = 0; i < 4 && p; i++) {
+                        p = p.parentElement;
+                        if (p && (
+                            /toast|modal|dialog|overlay|popup|banner/i.test(p.className || '') ||
+                            p.getAttribute && (p.getAttribute('role') === 'dialog' ||
+                                               p.getAttribute('role') === 'alert')
+                        )) { targets.push(p); break; }
+                    }
+                    for (const t of targets) {
+                        t.style.setProperty('visibility', 'hidden', 'important');
+                        t.style.setProperty('pointer-events', 'none', 'important');
+                    }
+                    return true;
+                }""",
+                ref,
+            )
+            if hidden:
+                return (f"dismissed obstruction #{ref} by hiding it (close button was "
+                        f"unreachable; element hidden so it no longer blocks the page)")
+            return f"FAILED to dismiss #{ref}: element not found to hide."
+        except Exception as e:
+            return f"FAILED to dismiss #{ref}: {type(e).__name__}: {e}"
 
     return f"unknown action: {kind}"
 
