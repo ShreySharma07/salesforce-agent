@@ -1,12 +1,12 @@
-// app/login/page.tsx
+// app/login/page.tsx — Repliq light theme, glass card on the gradient hero bg.
 "use client";
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { motion } from "framer-motion";
+import Link from "next/link";
 import { useLogin, useRegister } from "@/lib/auth";
 import { ApiError } from "@/lib/api";
-import { ConnectorBand } from "@/components/ConnectorBand";
+import { T, glass, primaryBtn } from "@/lib/theme";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -24,226 +24,76 @@ export default function LoginPage() {
     e.preventDefault();
     setError(null);
     try {
-      if (mode === "login") {
-        await login.mutateAsync({ email, password });
-      } else {
-        await register.mutateAsync({ email, password, display_name: name });
-      }
+      if (mode === "login") await login.mutateAsync({ email, password });
+      else await register.mutateAsync({ email, password, display_name: name });
       router.push("/dashboard");
     } catch (err) {
-      setError(
-        err instanceof ApiError ? err.message : "Something went wrong.",
-      );
+      setError(err instanceof ApiError ? err.message : "Something went wrong.");
     }
   }
 
+  const field: React.CSSProperties = {
+    background: "#fff", border: "1px solid rgba(11,18,51,0.12)", borderRadius: 11,
+    padding: "12px 14px", color: T.ink, fontSize: 15, width: "100%", outline: "none",
+  };
+
   return (
-    <main className="auth-wrap">
-      <motion.div
-        initial={{ opacity: 0, y: 16 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.5, ease: [0.16, 1, 0.3, 1] }}
-        className="auth-card glass"
-      >
-        <div className="brand display">
-          <span className="dot dot-live" /> agent
-        </div>
-        <h1 className="display">
+    <main style={{ minHeight: "100vh", display: "grid", placeItems: "center", padding: 24, background: T.pageBg, position: "relative", overflow: "hidden" }}>
+      <div style={{ position: "absolute", top: "8%", left: "10%", width: 460, height: 460, borderRadius: "50%", background: "radial-gradient(circle,rgba(139,92,246,0.32),rgba(139,92,246,0) 70%)", filter: "blur(20px)", pointerEvents: "none" }} />
+      <div style={{ position: "absolute", bottom: "4%", right: "8%", width: 500, height: 500, borderRadius: "50%", background: "radial-gradient(circle,rgba(34,211,238,0.26),rgba(34,211,238,0) 70%)", filter: "blur(20px)", pointerEvents: "none" }} />
+
+      <div style={{ ...glass, width: "100%", maxWidth: 440, padding: "40px 40px 30px", position: "relative", zIndex: 2 }}>
+        <Link href="/" style={{ display: "flex", alignItems: "center", gap: 11, textDecoration: "none", marginBottom: 28 }}>
+          <span style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 32, height: 32, borderRadius: 9, background: T.grad, boxShadow: "0 6px 16px rgba(99,102,241,0.4)" }}>
+            <span style={{ width: 10, height: 10, borderRadius: "50%", background: "#fff" }} />
+          </span>
+          <span style={{ fontSize: 20, fontWeight: 700, letterSpacing: "-0.03em", color: T.ink }}>Repliq</span>
+        </Link>
+
+        <h1 style={{ fontSize: 28, fontWeight: 700, letterSpacing: "-0.03em", color: T.ink, margin: "0 0 8px" }}>
           {mode === "login" ? "Welcome back" : "Create your account"}
         </h1>
-        <p className="text-dim sub">
-          {mode === "login"
-            ? "Sign in to watch your automations run."
-            : "Watch a task once. Let the agent do it from then on."}
+        <p style={{ margin: "0 0 28px", fontSize: 15, lineHeight: 1.5, color: T.body }}>
+          {mode === "login" ? "Sign in to watch your automations run." : "Watch a task once. Let the agent do it from then on."}
         </p>
 
-        <form onSubmit={submit} className="form">
+        <form onSubmit={submit} style={{ display: "flex", flexDirection: "column", gap: 16 }}>
           {mode === "register" && (
-            <label className="field">
-              <span>Name</span>
-              <input
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="Ada Lovelace"
-                autoComplete="name"
-              />
+            <label style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+              <span style={{ fontSize: 13, color: T.ink2, fontWeight: 500 }}>Name</span>
+              <input style={field} value={name} onChange={(e) => setName(e.target.value)} placeholder="Ada Lovelace" autoComplete="name" />
             </label>
           )}
-          <label className="field">
-            <span>Email</span>
-            <input
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="you@company.com"
-              autoComplete="email"
-              required
-            />
+          <label style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+            <span style={{ fontSize: 13, color: T.ink2, fontWeight: 500 }}>Email</span>
+            <input style={field} type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@company.com" autoComplete="email" required />
           </label>
-          <label className="field">
-            <span>Password</span>
-            <input
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="••••••••"
-              autoComplete={
-                mode === "login" ? "current-password" : "new-password"
-              }
-              minLength={8}
-              required
-            />
+          <label style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+            <span style={{ fontSize: 13, color: T.ink2, fontWeight: 500 }}>Password</span>
+            <input style={field} type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" autoComplete={mode === "login" ? "current-password" : "new-password"} minLength={8} required />
           </label>
 
-          {error && <div className="err mono">{error}</div>}
+          {error && (
+            <div style={{ fontSize: 13, color: T.bad, background: T.badBg, border: "1px solid rgba(248,113,113,0.3)", borderRadius: 9, padding: "10px 12px" }}>{error}</div>
+          )}
 
-          <button type="submit" className="cta" disabled={busy}>
-            {busy
-              ? "Working…"
-              : mode === "login"
-                ? "Sign in"
-                : "Create account"}
+          <button type="submit" style={{ ...primaryBtn, width: "100%", padding: 13, marginTop: 4, opacity: busy ? 0.6 : 1 }} disabled={busy}>
+            {busy ? "Working…" : mode === "login" ? "Sign in" : "Create account"}
           </button>
         </form>
 
-        <div className="switch text-dim">
+        <div style={{ marginTop: 20, fontSize: 14, textAlign: "center", color: T.body }}>
           {mode === "login" ? (
-            <>
-              New here?{" "}
-              <button onClick={() => setMode("register")}>
-                Create an account
-              </button>
-            </>
+            <>New here?{" "}<button onClick={() => setMode("register")} style={linkBtn}>Create an account</button></>
           ) : (
-            <>
-              Already have an account?{" "}
-              <button onClick={() => setMode("login")}>Sign in</button>
-            </>
+            <>Already have an account?{" "}<button onClick={() => setMode("login")} style={linkBtn}>Sign in</button></>
           )}
         </div>
-
-        <div className="band-mount">
-          <div className="band-label text-faint mono">CONNECTS WITH</div>
-          <ConnectorBand />
-        </div>
-      </motion.div>
-
-      <style jsx>{`
-        .auth-wrap {
-          min-height: 100vh;
-          display: grid;
-          place-items: center;
-          padding: 24px;
-        }
-        .auth-card {
-          width: 100%;
-          max-width: 460px;
-          padding: 40px 40px 24px;
-        }
-        .brand {
-          display: flex;
-          align-items: center;
-          gap: 9px;
-          font-size: 15px;
-          letter-spacing: 0.04em;
-          color: var(--text);
-          margin-bottom: 28px;
-        }
-        h1 {
-          font-size: 28px;
-          font-weight: 600;
-          margin: 0 0 8px;
-        }
-        .sub {
-          margin: 0 0 28px;
-          font-size: 15px;
-          line-height: 1.5;
-        }
-        .form {
-          display: flex;
-          flex-direction: column;
-          gap: 16px;
-        }
-        .field {
-          display: flex;
-          flex-direction: column;
-          gap: 7px;
-        }
-        .field span {
-          font-size: 13px;
-          color: var(--text-dim);
-        }
-        .field input {
-          background: rgba(10, 14, 20, 0.6);
-          border: 1px solid var(--panel-border);
-          border-radius: 10px;
-          padding: 12px 14px;
-          color: var(--text);
-          font-size: 15px;
-          font-family: var(--font-body);
-          transition: border-color 0.15s;
-        }
-        .field input:focus {
-          outline: none;
-          border-color: var(--accent);
-        }
-        .err {
-          font-size: 13px;
-          color: var(--bad);
-          background: rgba(248, 113, 113, 0.08);
-          border: 1px solid rgba(248, 113, 113, 0.2);
-          border-radius: 8px;
-          padding: 10px 12px;
-        }
-        .cta {
-          margin-top: 4px;
-          background: var(--accent);
-          color: #04181a;
-          border: none;
-          border-radius: 10px;
-          padding: 13px;
-          font-size: 15px;
-          font-weight: 600;
-          cursor: pointer;
-          transition:
-            transform 0.1s,
-            filter 0.15s;
-        }
-        .cta:hover:not(:disabled) {
-          filter: brightness(1.08);
-        }
-        .cta:active:not(:disabled) {
-          transform: translateY(1px);
-        }
-        .cta:disabled {
-          opacity: 0.6;
-          cursor: default;
-        }
-        .switch {
-          margin-top: 20px;
-          font-size: 14px;
-          text-align: center;
-        }
-        .switch button {
-          background: none;
-          border: none;
-          color: var(--accent);
-          cursor: pointer;
-          font-size: 14px;
-          padding: 0;
-        }
-        .band-mount {
-          margin: 28px -40px 0;
-          border-top: 1px solid var(--panel-border);
-          padding-top: 12px;
-        }
-        .band-label {
-          font-size: 10px;
-          letter-spacing: 0.16em;
-          text-align: center;
-          margin-bottom: 4px;
-        }
-      `}</style>
+      </div>
     </main>
   );
 }
+
+const linkBtn: React.CSSProperties = {
+  background: "none", border: "none", color: "#6366f1", cursor: "pointer", fontSize: 14, padding: 0, fontWeight: 600,
+};

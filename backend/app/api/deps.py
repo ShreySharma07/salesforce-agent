@@ -39,7 +39,7 @@ async def get_current_user(session: str | None = Cookie(default=None)) -> User:
                 # Seeded user missing — synthesize a minimal one so dev flows
                 # still resolve (the seed migration should have created it).
                 user = User(id=settings.default_user_id,
-                            email="dev@local", display_name="Dev",
+                            email="dev@loca.dev", display_name="Dev",
                             status=UserStatus.ACTIVE)
         if user is None:
             raise HTTPException(status_code=401, detail="not authenticated")

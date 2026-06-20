@@ -55,7 +55,7 @@ class GeminiClient:
         self.base_url = os.getenv("BACKEND_MCP_URL", "").rstrip("/")
         self.run_id = os.getenv("RUN_ID")
         self.run_token = os.getenv("RUN_TOKEN")
-        self.model = model or os.getenv("LLM_MODEL", "gemini-2.5-flash")
+        self.model = model or os.getenv("LLM_MODEL", "gemini-3-flash-preview")
         if not self.base_url:
             raise LLMClientError(
                 "BACKEND_MCP_URL not set — the backend must inject it at "

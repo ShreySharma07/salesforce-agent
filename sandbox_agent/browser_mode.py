@@ -22,11 +22,7 @@ from typing import Any
 
 from playwright.sync_api import Page, TimeoutError as PWTimeoutError
 
-from sandbox_agent.grounding import (
-    extract_from_page,
-    render_for_prompt,
-    annotate_screenshot,
-)
+from sandbox_agent.grounding import extract_from_page, render_for_prompt
 from sandbox_agent.llm_client import GeminiClient
 from sandbox_agent.schemas import LoopIteration
 
@@ -40,8 +36,8 @@ Each turn you receive:
   - SCREENSHOT: the current viewport
   - TRAJECTORY: every previous (thought, action, observation) this step — study it so you do not repeat a failed approach
 
-Output exactly one JSON object — no prose, no code fences:
-  {"thought": "<short reasoning that references the trajectory>", "action": "<one of below>", ...args}
+Output exactly one JSON object — no prose, no code fences. Keep "thought" to ONE short sentence (the JSON must always be complete and valid; a long thought that gets truncated is useless):
+  {"thought": "<one short sentence referencing the trajectory>", "action": "<one of below>", ...args}
 
 Actions:
   {"thought": "...", "action": "click", "ref": <int>}
@@ -64,6 +60,7 @@ Rules:
   - Emit `done` only when the GOAL is clearly accomplished, citing concrete on-page evidence.
   - Emit `give_up` only after the trajectory shows you genuinely cannot proceed (needed element absent, repeated failures).
   - If a previous action in the TRAJECTORY did not work, try a DIFFERENT approach — never repeat the same failed action.
+  - Your ENTIRE response must be a single COMPLETE JSON object. Keep "thought" to one sentence so the JSON is never truncated. Never write long prose.
 """
 
 
@@ -191,11 +188,6 @@ def execute_step(
             time.sleep(1)
             continue
 
-        # Set-of-Mark: draw numbered boxes onto the screenshot so the marks
-        # in the image match the #refs in ELEMENTS. Degrades to the raw
-        # screenshot if annotation fails.
-        screenshot = annotate_screenshot(screenshot, elements)
-
         screenshot_ref = _maybe_save_screenshot(screenshot, screenshot_dir, iteration)
 
         # ---------- REASON ----------
@@ -205,7 +197,7 @@ def execute_step(
         prompt_parts += [
             f"URL: {url}",
             f"TITLE: {title}",
-            "ELEMENTS (the numbered boxes drawn on the screenshot correspond to these #refs):",
+            "ELEMENTS:",
             elements_text,
             "TRAJECTORY (every previous turn this step):",
             _render_trajectory(trace),
@@ -216,7 +208,7 @@ def execute_step(
         try:
             response = llm.generate(
                 prompt=prompt, system=SYSTEM_PROMPT,
-                images=[screenshot], json_mode=True, max_tokens=1024,
+                images=[screenshot], json_mode=True, max_tokens=2048,
             )
         except Exception as llm_err:
             err_str = str(llm_err)
@@ -238,7 +230,7 @@ def execute_step(
                     screenshot = page.screenshot(type="png")
                     response = llm.generate(
                         prompt=prompt, system=SYSTEM_PROMPT,
-                        images=[screenshot], json_mode=True, max_tokens=1024,
+                        images=[screenshot], json_mode=True, max_tokens=2048,
                     )
                 except Exception as retry_err:
                     trace.append(LoopIteration(
@@ -262,9 +254,31 @@ def execute_step(
         out_tok = getattr(response, "output_tokens", 0) or 0
 
         if action is None:
+            # One corrective retry: occasionally the model wraps JSON in prose
+            # or emits a partial object. Re-ask tersely for JSON only before
+            # burning the whole iteration.
+            try:
+                retry_prompt = (
+                    prompt
+                    + "\n\nYour previous response could not be parsed as JSON. "
+                    "Respond with EXACTLY ONE complete JSON object and nothing "
+                    "else — no prose, no markdown, no code fences. Keep "
+                    "\"thought\" to one short sentence."
+                )
+                response = llm.generate(
+                    prompt=retry_prompt, system=SYSTEM_PROMPT,
+                    images=[screenshot], json_mode=True, max_tokens=2048,
+                )
+                action = parse_action(response.text)
+                in_tok += getattr(response, "input_tokens", 0) or 0
+                out_tok += getattr(response, "output_tokens", 0) or 0
+            except Exception:
+                action = None
+
+        if action is None:
             trace.append(LoopIteration(
                 iteration=iteration, action="(unparseable)",
-                observation="could not parse model output as JSON",
+                observation="could not parse model output as JSON (after one retry)",
                 error="parse_failure", screenshot_ref=screenshot_ref,
                 input_tokens=in_tok, output_tokens=out_tok,
                 latency_ms=int((time.monotonic() - iter_start) * 1000),
@@ -308,7 +322,7 @@ def execute_step(
 
         # ---------- ACT ----------
         try:
-            observation = _execute_action(page, kind, action, grounding=elements)
+            observation = _execute_action(page, kind, action)
             err = None
         except Exception as e:
             observation = ""
@@ -328,61 +342,19 @@ def execute_step(
 # Action execution
 # ---------------------------------------------------------------------------
 
-def _execute_action(page: Page, kind: str, action: dict, grounding=None) -> str:
+def _execute_action(page: Page, kind: str, action: dict) -> str:
     """Execute one action, return a compact text observation describing
-    what happened (fed back into the next turn's trajectory).
-
-    D2: when grounding is available, the element's semantic descriptor is
-    written back into action_args (action["target"]) so the persisted trace
-    — and any procedure distilled from it — records "click button 'New' in
-    header", not a meaningless ref int.
-    D5: if the locator-based action fails (Lightning re-renders detach
-    nodes), fall back to clicking the element's box center coordinates.
-    """
-    def _el(ref: int):
-        return grounding.by_ref(ref) if grounding is not None else None
-
-    def _describe(ref: int) -> str:
-        el = _el(ref)
-        return el.descriptor if el else f"element #{ref}"
-
-    def _record_target(ref: int) -> None:
-        el = _el(ref)
-        if el is not None:
-            action["target"] = el.descriptor
-            action["stable_id"] = el.stable_id
-
+    what happened (fed back into the next turn's trajectory)."""
     if kind == "click":
         ref = int(action["ref"])
-        _record_target(ref)
-        try:
-            page.locator(f'[data-agent-ref="{ref}"]').first.click(timeout=5000)
-            return f"clicked {_describe(ref)} (#{ref})"
-        except Exception as loc_err:
-            el = _el(ref)
-            if el is not None and el.w > 0 and el.h > 0:
-                # Coordinate fallback: click the box center.
-                page.mouse.click(el.x + el.w / 2, el.y + el.h / 2)
-                return (f"clicked {_describe(ref)} (#{ref}) via coordinates "
-                        f"(locator failed: {type(loc_err).__name__})")
-            raise
+        page.locator(f'[data-agent-ref="{ref}"]').first.click(timeout=5000)
+        return f"clicked element #{ref}"
 
     if kind == "fill":
         ref = int(action["ref"])
         text = str(action.get("text", ""))
-        _record_target(ref)
-        try:
-            page.locator(f'[data-agent-ref="{ref}"]').first.fill(text, timeout=5000)
-            return f"filled {_describe(ref)} (#{ref}) with {len(text)} chars"
-        except Exception as loc_err:
-            el = _el(ref)
-            if el is not None and el.w > 0 and el.h > 0:
-                # Fallback: focus by coordinate click, then type.
-                page.mouse.click(el.x + el.w / 2, el.y + el.h / 2)
-                page.keyboard.type(text)
-                return (f"filled {_describe(ref)} (#{ref}) via coordinates "
-                        f"(locator failed: {type(loc_err).__name__})")
-            raise
+        page.locator(f'[data-agent-ref="{ref}"]').first.fill(text, timeout=5000)
+        return f"filled element #{ref} with {len(text)} chars"
 
     if kind == "press":
         key = str(action.get("key", ""))
@@ -411,16 +383,38 @@ def _execute_action(page: Page, kind: str, action: dict, grounding=None) -> str:
         return f"opened {provider}, logged in"
 
     if kind == "scroll":
-        d = action.get("direction", "down")
-        delta = 700
-        dx, dy = (
-            (0, delta) if d == "down" else
-            (0, -delta) if d == "up" else
-            (delta, 0) if d == "right" else
-            (-delta, 0)
-        )
-        page.mouse.wheel(dx, dy)
-        return f"scrolled {d}"
+        direction = action.get("direction", "down")
+        ref = action.get("ref") 
+        
+        # 1. Targeted Scroll
+        if ref is not None:
+            try:
+                # Cast to int to handle strict string/int JSON type hallucinations
+                locator = page.locator(f'[data-agent-ref="{int(ref)}"]').first
+                locator.scroll_into_view_if_needed(timeout=2000)
+                # Sleep needed here too for the same visual stabilization reasons
+                time.sleep(0.5) 
+                return f"scrolled element #{ref} into view"
+            except Exception as e:
+                return f"failed to scroll element #{ref}: {e}"
+
+        # 2. Global Exploratory Scroll
+        amount = 700 
+        script = ""
+        if direction == "down":
+            script = f"window.scrollBy(0, {amount});"
+        elif direction == "up":
+            script = f"window.scrollBy(0, -{amount});"
+        elif direction == "right":
+            script = f"window.scrollBy({amount}, 0);"
+        elif direction == "left":
+            script = f"window.scrollBy(-{amount}, 0);"
+        
+        page.evaluate(script)
+        
+        # CRITICAL: Wait for the DOM and any lazy-loaded images to settle 
+        time.sleep(0.5) 
+        return f"scrolled global window {direction}"
 
     if kind == "wait":
         secs = min(float(action.get("seconds", 1)), 10)

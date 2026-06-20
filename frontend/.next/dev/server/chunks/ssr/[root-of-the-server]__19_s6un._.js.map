@@ -1,0 +1,6 @@
+{
+  "version": 3,
+  "sources": [],
+  "sections": [
+    {"offset": {"line": 10, "column": 0}, "map": {"version":3,"sources":["file:///home/shrey/projects/salesforce-agent/frontend/src/app/providers.tsx"],"sourcesContent":["// app/providers.tsx\n\"use client\";\n\nimport { QueryClient, QueryClientProvider } from \"@tanstack/react-query\";\nimport { useState } from \"react\";\n\nexport function Providers({ children }: { children: React.ReactNode }) {\n  const [client] = useState(\n    () =>\n      new QueryClient({\n        defaultOptions: {\n          queries: { refetchOnWindowFocus: false, retry: 1 },\n        },\n      }),\n  );\n  return (\n    <QueryClientProvider client={client}>{children}</QueryClientProvider>\n  );\n}"],"names":["Providers","children","client","defaultOptions","queries","refetchOnWindowFocus","retry"],"mappings":";;;;;AAGA;AAAA;AACA;AAJA,oBAAoB;AACpB;;;;AAKO,SAASA,UAAU,EAAEC,QAAQ,EAAiC;IACnE,MAAM,CAACC,OAAO,GAAG,IAAA,iNAAQ,EACvB,IACE,IAAI,4LAAW,CAAC;YACdC,gBAAgB;gBACdC,SAAS;oBAAEC,sBAAsB;oBAAOC,OAAO;gBAAE;YACnD;QACF;IAEJ,qBACE,8OAAC,6MAAmB;QAACJ,QAAQA;kBAASD;;;;;;AAE1C"}}]
+}

@@ -1,24 +1,14 @@
 """
-Visual + DOM grounding (v2) — the agent's eyes.
+Visual + DOM grounding (v2.1) — the agent's eyes.
 
-Upgrades over v1 (flat element list + raw screenshot):
+v2 features (SoM, stable IDs, shadow DOM, viewport discipline, regions,
+modal awareness) PLUS v2.1 fixes from the first live runs:
 
-  D1  Set-of-Mark (SoM): numbered boxes drawn ONTO the screenshot so the
-      visual and the refs are fused — the model never has to mentally join
-      "#12 in the text" with "that button in the image".
-  D2  Stable semantic identity: every element carries a stable_id +
-      descriptor (role + name + region). Actions are recorded against
-      descriptors, so traces — and therefore procedural memories — are
-      replayable across runs instead of storing meaningless ref ints.
-  D3  Shadow-DOM-aware extraction (open shadow roots; Lightning/LWC) with
-      semantic roles, states (disabled/checked/expanded), and region
-      detection from landmarks (header/nav/main/dialog).
-  D4  Viewport discipline: only in-viewport elements get marks; off-screen
-      interactables are summarized; the agent is told its scroll position.
-  D5  Bounding boxes exposed so click-at-center is available as a fallback
-      when locator-based actions fail (Lightning re-renders detach nodes).
-  D6  Cheap regions + modal awareness: when a dialog is open, elements
-      behind it are flagged not-actionable.
+  FIX-1  Fillability: every element is tagged `fillable` (is it text-enterable?)
+         so the executor can REFUSE a fill on a link/button, and the prompt
+         marks text fields with "(type here)". Root cause of the Wikipedia
+         search loop: a link was being filled as if it were the search box.
+  FIX-2  searchbox / input[type=search] explicitly selected and recognised.
 
 Everything here is deterministic sandbox-side code — no LLM calls.
 """
@@ -30,10 +20,7 @@ from dataclasses import dataclass, field
 
 from playwright.sync_api import Page
 
-
-# How many in-viewport elements get visual marks (token + clutter budget).
 MAX_MARKED = 50
-
 
 EXTRACT_JS = r"""
 () => {
@@ -41,7 +28,8 @@ EXTRACT_JS = r"""
     'a[href]','button','input:not([type="hidden"])','select','textarea',
     '[role="button"]','[role="link"]','[role="checkbox"]','[role="radio"]',
     '[role="tab"]','[role="menuitem"]','[role="option"]','[role="switch"]',
-    '[role="textbox"]','[role="combobox"]','[contenteditable="true"]',
+    '[role="textbox"]','[role="combobox"]','[role="searchbox"]',
+    '[contenteditable="true"]','input[type="search"]',
   ];
   const vw = window.innerWidth, vh = window.innerHeight;
   const isVisible = (el) => {
@@ -77,7 +65,8 @@ EXTRACT_JS = r"""
     if (tag === 'textarea') return 'textbox';
     if (tag === 'input') {
       const t = (el.getAttribute('type') || 'text').toLowerCase();
-      if (['text','email','url','search','tel','number','password'].includes(t)) return 'textbox';
+      if (t === 'search') return 'searchbox';
+      if (['text','email','url','tel','number','password'].includes(t)) return 'textbox';
       if (t === 'checkbox') return 'checkbox';
       if (t === 'radio') return 'radio';
       if (['submit','button','reset'].includes(t)) return 'button';
@@ -85,8 +74,6 @@ EXTRACT_JS = r"""
     }
     return tag;
   };
-  // Region: nearest landmark ancestor. Dialogs win (modal awareness);
-  // walking parentNode/host handles shadow DOM boundaries.
   const regionOf = (el) => {
     let cur = el;
     while (cur) {
@@ -121,7 +108,6 @@ EXTRACT_JS = r"""
   };
   collectShadow(document);
 
-  // Is a modal dialog open anywhere?
   let modalOpen = false;
   for (const root of roots) {
     try {
@@ -142,13 +128,22 @@ EXTRACT_JS = r"""
         const r = el.getBoundingClientRect();
         const ref = counter++;
         try { el.setAttribute('data-agent-ref', String(ref)); } catch {}
+        const role = roleOf(el);
+        const tag = el.tagName.toLowerCase();
+        const inputType = (el.getAttribute('type') || 'text').toLowerCase();
+        const fillable =
+          (tag === 'input' && !['checkbox','radio','submit','button','reset','file','range','color'].includes(inputType)) ||
+          tag === 'textarea' ||
+          role === 'textbox' || role === 'combobox' || role === 'searchbox' ||
+          el.isContentEditable === true;
         out.push({
-          ref, role: roleOf(el), name: accName(el).slice(0, 100),
+          ref, role, name: accName(el).slice(0, 100),
           value: (el.value !== undefined && el.value !== null) ? String(el.value).slice(0, 100) : '',
           x: Math.round(r.left), y: Math.round(r.top),
           w: Math.round(r.width), h: Math.round(r.height),
           in_viewport: r.bottom > 0 && r.top < vh && r.right > 0 && r.left < vw,
           region: regionOf(el), states: stateOf(el),
+          fillable: fillable, tag: tag,
         });
       }
     }
@@ -177,19 +172,16 @@ class GroundedElement:
     in_viewport: bool = True
     region: str = "main"
     states: list[str] = field(default_factory=list)
+    fillable: bool = False
+    tag: str = ""
 
     @property
     def stable_id(self) -> str:
-        """Content-derived identity, stable across iterations and runs.
-        Deliberately excludes position/ref so the same logical control
-        matches even after layout shifts."""
         basis = f"{self.role}|{self.name.strip().lower()}|{self.region}"
         return hashlib.sha1(basis.encode()).hexdigest()[:10]
 
     @property
     def descriptor(self) -> str:
-        """Human/agent-readable semantic identity — what traces and
-        procedural memory record instead of the ephemeral ref int."""
         d = f"{self.role} '{self.name}'" if self.name else self.role
         if self.region != "main":
             d += f" in {self.region}"
@@ -213,10 +205,7 @@ class PageGrounding:
 
 
 def extract_from_page(page: Page) -> PageGrounding:
-    """Run the extractor; return full PageGrounding (elements + viewport
-    context + modal state)."""
     import time
-
     try:
         page.wait_for_load_state("networkidle", timeout=3500)
     except Exception:
@@ -233,7 +222,6 @@ def extract_from_page(page: Page) -> PageGrounding:
             break
         if attempt == 1:
             time.sleep(2)
-
     if not raw:
         return PageGrounding(elements=[])
 
@@ -245,6 +233,8 @@ def extract_from_page(page: Page) -> PageGrounding:
             in_viewport=bool(i.get("in_viewport", True)),
             region=i.get("region", "main"),
             states=list(i.get("states", [])),
+            fillable=bool(i.get("fillable", False)),
+            tag=i.get("tag", ""),
         )
         for i in raw.get("elements", [])
     ]
@@ -257,18 +247,7 @@ def extract_from_page(page: Page) -> PageGrounding:
     )
 
 
-# ---------------------------------------------------------------------------
-# Prompt rendering (D4 + D6)
-# ---------------------------------------------------------------------------
-
 def render_for_prompt(g: PageGrounding) -> str:
-    """Structured, viewport-disciplined rendering.
-
-    - In-viewport elements first (these carry visual marks), grouped by region.
-    - When a modal is open, only dialog elements are listed as actionable;
-      the rest are explicitly flagged blocked.
-    - Off-screen interactables summarized, with scroll position context.
-    """
     if not g.elements:
         return "(no interactive elements detected)"
 
@@ -292,7 +271,6 @@ def render_for_prompt(g: PageGrounding) -> str:
                 lines.append(f"[{region.upper()}]")
                 lines += [_line(e) for e in by_region[region]]
 
-    # Scroll / overflow context (D4)
     if g.page_height > g.viewport_h > 0:
         pct = int(100 * (g.scroll_y + g.viewport_h) / max(g.page_height, 1))
         lines.append(f"(viewport shows ~{min(pct,100)}% down the page; scroll_y={g.scroll_y})")
@@ -311,6 +289,8 @@ def render_for_prompt(g: PageGrounding) -> str:
 
 def _line(e: GroundedElement) -> str:
     line = f"#{e.ref} [{e.role}] {e.name!r}"
+    if e.fillable:
+        line += " (type here)"
     if e.value:
         line += f" value={e.value!r}"
     if e.states:
@@ -318,17 +298,7 @@ def _line(e: GroundedElement) -> str:
     return line
 
 
-# ---------------------------------------------------------------------------
-# Set-of-Mark screenshot annotation (D1)
-# ---------------------------------------------------------------------------
-
 def annotate_screenshot(png_bytes: bytes, g: PageGrounding) -> bytes:
-    """Draw numbered boxes for in-viewport elements onto the screenshot.
-
-    Degrades gracefully: if Pillow is unavailable or drawing fails, the raw
-    screenshot is returned unchanged (the agent still has the text list).
-    Marks match the refs in the ELEMENTS list exactly.
-    """
     try:
         from PIL import Image, ImageDraw, ImageFont
     except Exception:
@@ -340,15 +310,18 @@ def annotate_screenshot(png_bytes: bytes, g: PageGrounding) -> bytes:
             font = ImageFont.load_default()
         except Exception:
             font = None
-
-        # Screenshot pixels may differ from CSS pixels (device scale).
         scale = img.width / g.viewport_w if g.viewport_w else 1.0
-
         visible = [e for e in g.elements if e.in_viewport][:MAX_MARKED]
         for e in visible:
             x0, y0 = e.x * scale, e.y * scale
             x1, y1 = (e.x + e.w) * scale, (e.y + e.h) * scale
-            color = (255, 64, 64) if e.region == "dialog" else (37, 99, 235)
+            # fillable=green, dialog=red, else blue
+            if e.region == "dialog":
+                color = (255, 64, 64)
+            elif e.fillable:
+                color = (34, 197, 94)
+            else:
+                color = (37, 99, 235)
             draw.rectangle([x0, y0, x1, y1], outline=color, width=2)
             label = str(e.ref)
             tw = draw.textlength(label, font=font) if font else 8 * len(label)
@@ -357,7 +330,6 @@ def annotate_screenshot(png_bytes: bytes, g: PageGrounding) -> bytes:
             ly = max(0, y0 - th - 4) if y0 - th - 4 > 0 else y0 + 2
             draw.rectangle([lx, ly, lx + tw + 6, ly + th + 4], fill=color)
             draw.text((lx + 3, ly + 2), label, fill=(255, 255, 255), font=font)
-
         out = io.BytesIO()
         img.save(out, format="PNG")
         return out.getvalue()
