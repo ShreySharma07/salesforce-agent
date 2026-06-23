@@ -70,3 +70,81 @@ async def correct_plan(plan_id: str, body: CorrectionBody,
     plan.status = PlanStatus.PENDING_APPROVAL
     await repo.save_plan(plan)
     return plan
+
+
+import logging
+log = logging.getLogger(__name__)
+ 
+ 
+class CorrectionBody(BaseModel):
+    feedback: str
+ 
+ 
+@router.post("/{plan_id}/correct", response_model=Plan)
+async def correct_plan(plan_id: str, body: CorrectionBody,
+                       repo: ScopedRepo = Depends(get_scoped_repo_dep)):
+    """Apply the user's stated intent: regenerate the plan via the LLM so the
+    user never hand-edits steps — they describe what they want and the agent
+    produces a revised plan. Loops until the user approves.
+ 
+    The previous plan stays the anchor (faithful to the demonstrated actions);
+    the feedback reshapes it (e.g. 'do this for all NEW cases, not 00001378').
+    """
+    plan = await repo.get_plan(plan_id)
+    if plan is None:
+        raise HTTPException(404, f"plan {plan_id} not found")
+ 
+    # Try to load the original captions for maximum fidelity; fall back to
+    # caption-less regeneration if they aren't persisted.
+    captions = await _load_captions_for_plan(plan)
+ 
+    try:
+        from app.agent.plan_generator import regenerate_plan_from_intent
+        revised = regenerate_plan_from_intent(
+            previous_plan=plan,
+            user_feedback=body.feedback,
+            captions=captions,
+        )
+    except Exception as e:
+        log.exception("plan correction failed for %s", plan_id)
+        raise HTTPException(
+            500, f"could not regenerate plan from feedback: {type(e).__name__}: {e}"
+        )
+ 
+    # Persist the new version under the same plan id (scoped to this user).
+    await repo.save_plan(revised)
+    return revised
+ 
+ 
+async def _load_captions_for_plan(plan: Plan):
+    """Return the FrameCaptions for the plan's source recording if they were
+    persisted, else None (correction then runs caption-less). Adjust the body
+    to match wherever your pipeline stores captions.
+ 
+    Common storage spots to wire up here:
+      - a JSON file under local_storage keyed by source_video_id
+      - a captions table / column
+    Returns None safely if nothing is found, so correction still works.
+    """
+    if not plan.source_video_id:
+        return None
+    try:
+        import json, os
+        from app.config import get_settings
+        from app.agent.keyframe_captioner import FrameCaption
+        root = get_settings().local_storage_root
+        # Adjust this path to wherever captions are written by your pipeline:
+        candidate = os.path.join(root, "captions", f"{plan.source_video_id}.json")
+        if os.path.exists(candidate):
+            data = json.loads(open(candidate).read())
+            return [
+                FrameCaption(
+                    timestamp_seconds=c.get("timestamp_seconds", 0.0),
+                    description=c.get("description", ""),
+                )
+                for c in data
+            ]
+    except Exception:
+        pass
+    return None
+ 

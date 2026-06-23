@@ -11,7 +11,9 @@ Phase 2b:
 """
 from __future__ import annotations
 
+import json
 import os
+import re
 import time
 from typing import Any
 
@@ -65,7 +67,57 @@ def _route_step(step: Step) -> ExecutionMode:
     return ExecutionMode.BROWSER
 
 
-def _step_intent(step: Step) -> str:
+def _interpolate(text: str, variables: dict[str, Any]) -> str:
+    """Substitute ${var} and ${var.key} tokens from the variables dict."""
+    def _sub(m: re.Match) -> str:
+        key = m.group(1)
+        parts = key.split(".", 1)
+        val = variables.get(parts[0], m.group(0))
+        if len(parts) == 2 and isinstance(val, dict):
+            val = val.get(parts[1], m.group(0))
+        return str(val)
+    return re.sub(r"\$\{([^}]+)\}", _sub, text)
+
+
+# Salesforce record IDs are exactly 15 or 18 alphanumeric chars with no spaces.
+# Anything longer or containing whitespace is prose (a sentence from an extract
+# step), not an ID — navigating to such a URL would produce a garbage page and
+# an infinite recovery loop.
+_MAX_URL_TOKEN_LEN = 30
+
+
+def _interpolate_for_url(url: str, variables: dict[str, Any]) -> tuple[str, str | None]:
+    """Substitute ${var} tokens for use inside a URL, with safety checks.
+
+    Returns (interpolated_url, error_or_None).  error is set when any
+    substituted value contains whitespace or exceeds _MAX_URL_TOKEN_LEN chars,
+    indicating the variable holds a prose sentence rather than a bare ID/token.
+    The caller should treat a non-None error as a step failure and re-evaluate
+    instead of navigating to the garbage URL.
+    """
+    bad: list[str] = []
+
+    def _sub(m: re.Match) -> str:
+        key = m.group(1)
+        parts = key.split(".", 1)
+        val = variables.get(parts[0], m.group(0))
+        if len(parts) == 2 and isinstance(val, dict):
+            val = val.get(parts[1], m.group(0))
+        val_str = str(val)
+        # Only flag values that were actually substituted (not left as ${…})
+        if val_str != m.group(0) and (" " in val_str or len(val_str) > _MAX_URL_TOKEN_LEN):
+            bad.append(
+                f"${{{key}}} resolved to {val_str!r} "
+                f"(contains whitespace or length {len(val_str)} > {_MAX_URL_TOKEN_LEN} — "
+                f"looks like a sentence, not a record ID)"
+            )
+        return val_str
+
+    result = re.sub(r"\$\{([^}]+)\}", _sub, url)
+    return result, ("; ".join(bad) if bad else None)
+
+
+def _step_intent(step: Step, variables: dict[str, Any] | None = None) -> str:
     base = step.description
     intent = step.details.get("intent")
     target = step.details.get("target_description")
@@ -77,7 +129,114 @@ def _step_intent(step: Step) -> str:
         parts.append(f"Target: {target}")
     if value:
         parts.append(f"Value: {value}")
-    return ". ".join(parts)
+    raw = ". ".join(parts)
+    return _interpolate(raw, variables) if variables else raw
+
+
+# ---------------------------------------------------------------------------
+# Control-flow helpers (DECISION / LOOP)
+# ---------------------------------------------------------------------------
+
+def _evaluate_condition(condition: str, variables: dict[str, Any]) -> bool:
+    """Evaluate a plan condition string against collected variables.
+    Defaults to True on any error so the run isn't silently aborted."""
+    if not condition:
+        return True
+    try:
+        return bool(eval(condition, {"__builtins__": {}}, dict(variables)))  # noqa: S307
+    except Exception:
+        return True
+
+
+def _resolve_loop_items(expr: str, variables: dict[str, Any]) -> list:
+    """Resolve a ${var} expression or literal list to a Python list."""
+    if isinstance(expr, list):
+        return expr
+    if isinstance(expr, str) and expr.startswith("${") and expr.endswith("}"):
+        key = expr[2:-1]
+        val = variables.get(key, [])
+        if isinstance(val, list):
+            return val
+        if isinstance(val, str):
+            import json
+            try:
+                parsed = json.loads(val)
+                return parsed if isinstance(parsed, list) else [parsed]
+            except Exception:
+                return [line for line in val.splitlines() if line.strip()]
+        return [val] if val else []
+    return []
+
+
+def _run_decision(
+    step: Step,
+    step_by_id: dict[str, Step],
+    page: "Page",
+    llm: "GeminiClient",
+    req: "RunRequest",
+    variables: dict[str, Any],
+) -> list[StepResult]:
+    condition = step.details.get("condition", "")
+    if_true = step.details.get("if_true", [])
+    if_false = step.details.get("if_false", [])
+
+    branch_taken = _evaluate_condition(condition, variables)
+    branch_ids: list[str] = if_true if branch_taken else if_false
+    branch_label = "true" if branch_taken else "false"
+
+    results: list[StepResult] = [
+        StepResult(
+            step_id=step.id,
+            status="succeeded",
+            detail=f"condition '{condition}' → {branch_label}; executing {branch_ids}",
+        )
+    ]
+    for sid in branch_ids:
+        branch_step = step_by_id.get(sid)
+        if branch_step is None:
+            continue
+        result = _run_step(page, llm, branch_step, req, variables=variables)
+        results.append(result)
+        variables.update(result.extracted)
+        if result.status in ("failed", "paused"):
+            break
+    return results
+
+
+def _run_loop(
+    step: Step,
+    step_by_id: dict[str, Step],
+    page: "Page",
+    llm: "GeminiClient",
+    req: "RunRequest",
+    variables: dict[str, Any],
+) -> list[StepResult]:
+    over_expr = step.details.get("over", "")
+    item_var = step.details.get("item_variable", "item")
+    body_ids: list[str] = step.details.get("body", [])
+    max_iters = int(step.details.get("max_iterations", 50))
+
+    items = _resolve_loop_items(over_expr, variables)
+    if not items:
+        return [StepResult(
+            step_id=step.id, status="succeeded",
+            detail=f"loop over '{over_expr}' — 0 items, nothing executed",
+        )]
+
+    results: list[StepResult] = []
+    for idx, item in enumerate(items[:max_iters]):
+        variables[item_var] = item
+        variables[f"{item_var}_index"] = idx
+        for sid in body_ids:
+            body_step = step_by_id.get(sid)
+            if body_step is None:
+                continue
+            result = _run_step(page, llm, body_step, req, variables=variables)
+            results.append(result)
+            variables.update(result.extracted)
+            if result.status in ("failed", "paused"):
+                return results  # abort loop on first failure
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -118,42 +277,60 @@ def run_plan(req: RunRequest) -> RunResponse:
                 )
 
         try:
-            for i, step in enumerate(req.plan.steps):
-                if i >= req.max_steps:
+            step_by_id = {s.id: s for s in req.plan.steps}
+            # Steps that are owned by a DECISION/LOOP parent are skipped in the
+            # linear walk — the parent dispatches them at the right time.
+            child_ids: set[str] = set()
+            for s in req.plan.steps:
+                if s.kind == StepKind.DECISION:
+                    child_ids.update(s.details.get("if_true", []))
+                    child_ids.update(s.details.get("if_false", []))
+                elif s.kind == StepKind.LOOP:
+                    child_ids.update(s.details.get("body", []))
+            variables: dict[str, Any] = {}
+            step_count = 0
+
+            for step in req.plan.steps:
+                if step.id in child_ids:
+                    continue  # handled by its DECISION/LOOP parent
+                if step_count >= req.max_steps:
                     return _finish("aborted", step_results, page, "max_steps reached", started)
                 if time.monotonic() - started > req.max_seconds:
                     return _finish("aborted", step_results, page, "max_seconds reached", started)
 
-                result = _run_step(page, llm, step, req)
-                step_results.append(result)
+                if step.kind == StepKind.DECISION:
+                    new_results = _run_decision(step, step_by_id, page, llm, req, variables)
+                elif step.kind == StepKind.LOOP:
+                    new_results = _run_loop(step, step_by_id, page, llm, req, variables)
+                else:
+                    result = _run_step(page, llm, step, req, variables=variables)
+                    variables.update(result.extracted)
+                    new_results = [result]
 
-                # Circuit breaker: quota exhaustion aborts the whole run.
-                if getattr(result, "quota_exhausted", False):
-                    return _finish("aborted", step_results, page,
-                                   f"run aborted at step {step.id}: LLM daily quota exhausted",
-                                   started)
+                for result in new_results:
+                    step_results.append(result)
+                    step_count += 1
 
-
-                # A step that returned 'paused' (human_input, captcha) always
-                # stops the run for intervention.
-                if result.status == "paused":
-                    return _finish("paused", step_results, page,
-                                   f"paused at step {step.id}: {result.pause_reason or ''}", started)
-
-                # A FAILED step is routed by its own on_failure policy.
-                if result.status == "failed":
-                    policy = (step.on_failure or "pause").lower()
-                    if policy == "abort":
-                        return _finish("failed", step_results, page,
-                                       f"step {step.id} failed (abort): {result.detail}", started)
-                    if policy == "pause":
-                        # Default policy. Stop and let a human decide — do NOT
-                        # march on into steps that depended on this one.
-                        return _finish("paused", step_results, page,
-                                       f"step {step.id} failed (pausing for review): {result.detail}",
+                    if getattr(result, "quota_exhausted", False):
+                        return _finish("aborted", step_results, page,
+                                       f"run aborted at step {result.step_id}: LLM daily quota exhausted",
                                        started)
-                    # policy == "continue": the only case we proceed. Log and go on.
-                    # (Caller sees the failed step in step_results.)
+                    if result.status == "paused":
+                        return _finish("paused", step_results, page,
+                                       f"paused at step {result.step_id}: {result.pause_reason or ''}",
+                                       started)
+                    if result.status == "failed":
+                        src = step_by_id.get(result.step_id, step)
+                        policy = (src.on_failure or "pause").lower()
+                        if policy == "abort":
+                            return _finish("failed", step_results, page,
+                                           f"step {result.step_id} failed (abort): {result.detail}",
+                                           started)
+                        if policy == "pause":
+                            return _finish("paused", step_results, page,
+                                           f"step {result.step_id} failed (pausing for review): {result.detail}",
+                                           started)
+                        # policy == "continue": log and proceed
 
             return _finish("completed", step_results, page, None, started)
 
@@ -164,7 +341,35 @@ def run_plan(req: RunRequest) -> RunResponse:
                 pass
 
 
-def _run_step(page: Page, llm: GeminiClient, step: Step, req: RunRequest) -> StepResult:
+def _browser_context_for_computer_mode(
+    trace: list[LoopIteration], give_up_reason: str
+) -> str:
+    """Summarise what browser mode already tried so computer mode doesn't repeat it."""
+    parts: list[str] = []
+    if give_up_reason:
+        parts.append(f"Browser mode gave up: {give_up_reason}")
+
+    failed = [
+        it for it in trace
+        if it.action not in {"done", "give_up", "(observe)", "(reason)", "(unparseable)"}
+        and (it.error or (it.observation or "").startswith(
+            ("FAILED", "CANNOT", "WARNING", "BLOCKED", "ESCALATION")
+        ))
+    ][-3:]
+
+    if failed:
+        parts.append("Last failed browser attempts (do NOT repeat these):")
+        for it in failed:
+            act = it.action
+            if it.action_args:
+                act += " " + json.dumps(it.action_args, separators=(",", ":"))
+            outcome = (it.error or it.observation or "")[:100]
+            parts.append(f"  - {act}: {outcome}")
+
+    return "\n".join(parts)
+
+
+def _run_step(page: Page, llm: GeminiClient, step: Step, req: RunRequest, *, variables: dict[str, Any] | None = None) -> StepResult:
     """Execute a single step."""
     # ---- Non-UI step kinds ----
     if step.kind == StepKind.WAIT:
@@ -209,6 +414,22 @@ def _run_step(page: Page, llm: GeminiClient, step: Step, req: RunRequest) -> Ste
         if not url:
             return StepResult(step_id=step.id, status="failed",
                               detail="navigate step missing url")
+        # Substitute ${variable} tokens, but guard against prose values that
+        # would produce a garbage URL (e.g. an extract that returned a sentence
+        # instead of a bare 18-char Salesforce record ID).
+        if variables:
+            url, url_err = _interpolate_for_url(url, variables)
+            if url_err:
+                return StepResult(
+                    step_id=step.id,
+                    status="failed",
+                    detail=(
+                        f"navigate aborted — interpolated variable is not a valid "
+                        f"record ID/token: {url_err}. "
+                        f"Re-evaluate the plan: use a ui_action click on the target "
+                        f"row instead of constructing a URL from extracted text."
+                    ),
+                )
         try:
             page.goto(url)
             return StepResult(step_id=step.id, status="succeeded",
@@ -217,8 +438,8 @@ def _run_step(page: Page, llm: GeminiClient, step: Step, req: RunRequest) -> Ste
             return StepResult(step_id=step.id, status="failed",
                               detail=f"navigate failed: {e}")
 
-    # ---- UI / extract / decision / loop — ReAct loop ----
-    intent = _step_intent(step)
+    # ---- UI / extract — ReAct loop ----
+    intent = _step_intent(step, variables)
     mode = _route_step(step)
     trace: list[LoopIteration] = []
 
@@ -231,10 +452,13 @@ def _run_step(page: Page, llm: GeminiClient, step: Step, req: RunRequest) -> Ste
         )
         trace = outcome.get("trace", [])
         if outcome["status"] == "stuck":
-            # Fallback: try computer mode for the same step.
-            cm_outcome = computer_mode.execute_step(llm, intent)
-            # computer_mode is pre-2b and returns no trace; keep the browser
-            # trace so the give-up reasoning is still visible.
+            # Fallback: try computer mode, passing a summary of what browser
+            # mode already tried so it doesn't repeat the same failed actions.
+            browser_ctx = _browser_context_for_computer_mode(
+                trace, outcome.get("evidence", "")
+            )
+            cm_outcome = computer_mode.execute_step(llm, intent, browser_context=browser_ctx)
+            # Keep the browser trace so the give-up reasoning is still visible.
             outcome = cm_outcome
     else:
         outcome = computer_mode.execute_step(llm, intent)

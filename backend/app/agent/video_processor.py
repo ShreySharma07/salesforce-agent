@@ -75,28 +75,43 @@ def extract_keyframes(
     source_video_key: str,
     video_id: str | None = None,
     *,
-    storage: Storage | None = None,
-    scene_threshold: float = SCENE_THRESHOLD,
-) -> VideoManifest:
-    """Extract keyframes from a video already in storage. Returns the
-    manifest; PNG frames are written into storage at predictable keys."""
+    storage: "Storage | None" = None,
+    scene_threshold: float | None = None,
+) -> "VideoManifest":
+    """Extract keyframes via HYBRID sampling: a steady time-based rate (so no
+    interaction is missed) PLUS scene-change frames (so page transitions are
+    captured). Uses settings.keyframe_extraction_fps for the time rate."""
     ensure_ffmpeg()
     settings = get_settings()
     storage = storage or get_storage()
     video_id = video_id or uuid.uuid4().hex[:12]
-
+ 
+    fps = getattr(settings, "keyframe_extraction_fps", 1.0) or 1.0
+    scene_thr = scene_threshold if scene_threshold is not None else 0.04
+ 
     src = storage.local_path(source_video_key)
     if not src.exists():
         raise FileNotFoundError(f"source video not found at {source_video_key}")
-
+ 
     duration = probe_duration(src)
-
+ 
     with tempfile.TemporaryDirectory(prefix="kf_") as tmp:
         tmp_dir = Path(tmp)
+        # The filter keeps a frame if EITHER:
+        #   - it's on the time grid (every 1/fps seconds), OR
+        #   - it's a significant scene change.
+        # isnan(prev_selected_t) handles the very first frame.
+        vf = (
+            f"select='"
+            f"gt(scene,{scene_thr})"
+            f"+isnan(prev_selected_t)"
+            f"+gte(t-prev_selected_t,{1.0/fps:.4f})"
+            f"',showinfo"
+        )
         cmd = [
             "ffmpeg", "-hide_banner", "-loglevel", "info",
             "-i", str(src),
-            "-vf", f"select='gt(scene,{scene_threshold})',showinfo",
+            "-vf", vf,
             "-vsync", "vfr",
             "-frame_pts", "1",
             str(tmp_dir / "frame_%05d.png"),
@@ -106,18 +121,22 @@ def extract_keyframes(
             raise RuntimeError(
                 f"ffmpeg failed (rc={proc.returncode}). stderr:\n{proc.stderr[-2000:]}"
             )
-
+ 
         produced = sorted(tmp_dir.glob("frame_*.png"))
         timestamps = _parse_showinfo_timestamps(proc.stderr)
-
-        # Downsample evenly if we got more frames than budget allows
+ 
+        # Drop adjacent near-identical frames (idle periods) to avoid wasting
+        # caption tokens on duplicates — cheap byte-size heuristic.
+        produced, timestamps = _dedup_adjacent(produced, timestamps)
+ 
+        # Cap at budget by even downsampling.
         if len(produced) > settings.keyframe_max_count:
             step = len(produced) / settings.keyframe_max_count
             indices = [int(i * step) for i in range(settings.keyframe_max_count)]
             produced = [produced[i] for i in indices]
-            if len(timestamps) >= max(indices) + 1:
+            if len(timestamps) >= (max(indices) + 1):
                 timestamps = [timestamps[i] for i in indices]
-
+ 
         keyframes: list[Keyframe] = []
         for idx, frame_path in enumerate(produced):
             ts = (
@@ -130,7 +149,7 @@ def extract_keyframes(
             keyframes.append(
                 Keyframe(index=idx, timestamp_seconds=round(ts, 3), storage_key=key)
             )
-
+ 
     manifest = VideoManifest(
         video_id=video_id,
         source_video_key=source_video_key,
@@ -143,6 +162,28 @@ def extract_keyframes(
         json.dumps(_manifest_to_dict(manifest), indent=2),
     )
     return manifest
+ 
+ 
+def _dedup_adjacent(frames: list, timestamps: list, *, min_pct_diff: float = 0.5):
+    """Remove a frame if it's within min_pct_diff% file-size of the previous
+    kept frame (a cheap 'looks basically identical' proxy that avoids decoding
+    pixels). Keeps the first frame always. Conservative — only drops obvious
+    idle duplicates, never near-distinct interaction frames."""
+    if not frames:
+        return frames, timestamps
+    kept_f = [frames[0]]
+    kept_t = [timestamps[0]] if timestamps else []
+    last_size = frames[0].stat().st_size
+    for i in range(1, len(frames)):
+        size = frames[i].stat().st_size
+        diff_pct = abs(size - last_size) / max(last_size, 1) * 100
+        if diff_pct >= min_pct_diff:
+            kept_f.append(frames[i])
+            if i < len(timestamps):
+                kept_t.append(timestamps[i])
+            last_size = size
+    return kept_f, kept_t
+ 
 
 
 def _parse_showinfo_timestamps(stderr: str) -> list[float]:
