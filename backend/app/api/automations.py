@@ -176,7 +176,14 @@ async def _execute_automation_in_sandbox(run_id: str) -> None:
                 row = await get_credential_row(session, user_id=user_id, provider=provider)
                 if row is not None and row.kind == "oauth":
                     env_key = f"{provider.upper()}_FRONTDOOR_PATH"
-                    extra_env[env_key] = f"/sandbox/frontdoor/{provider}?run_token={run_token}"
+                    # ret_url lands the browser on the neutral SF home page
+                    # regardless of which Lightning app was open last session
+                    # (avoids landing on Service Console, Sales Console, etc.).
+                    extra_env[env_key] = (
+                        f"/sandbox/frontdoor/{provider}"
+                        f"?run_token={run_token}"
+                        f"&ret_url=%2Flightning%2Fpage%2Fhome"
+                    )
 
         # Spawn sandbox with API keys auto-injected from backend env
         config = SpawnConfig(

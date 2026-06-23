@@ -24,6 +24,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from sandbox_agent.grounding import compress_for_llm
 from sandbox_agent.llm_client import GeminiClient
 
 
@@ -106,16 +107,19 @@ def execute_step(
     step_intent: str,
     *,
     max_turns: int = 5,
+    browser_context: str = "",
 ) -> dict[str, Any]:
     last_observation: dict | None = None
 
     for turn in range(1, max_turns + 1):
-        shot = screenshot()
+        shot = compress_for_llm(screenshot())
 
         prompt = (
             f"STEP: {step_intent}\n"
             f"DISPLAY: {SCREEN_W}x{SCREEN_H}\n"
         )
+        if browser_context:
+            prompt += f"BROWSER CONTEXT (already tried via DOM — avoid repeating):\n{browser_context}\n"
         if last_observation:
             prompt += f"PREV OBSERVATION: {json.dumps(last_observation)}\n"
         prompt += "Emit one action."
@@ -129,7 +133,7 @@ def execute_step(
             err_str = str(llm_err)
             if "Unable to process input image" in err_str or "INVALID_ARGUMENT" in err_str:
                 time.sleep(2)
-                shot = screenshot()
+                shot = compress_for_llm(screenshot())
                 try:
                     response = llm.generate(
                         prompt=prompt, system=SYSTEM_PROMPT,

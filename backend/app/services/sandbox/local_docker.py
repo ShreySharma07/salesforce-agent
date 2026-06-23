@@ -138,9 +138,14 @@ class LocalDockerRunner(SandboxRunner):
             "max_seconds": max_seconds,
             "memory_hints": memory_hints or {},
         }
-        # Use a generous client timeout slightly larger than the run cap
-        # so the sandbox can complete its own bookkeeping.
-        async with httpx.AsyncClient(timeout=max_seconds + 30) as client:
+        # The executor checks the run budget BETWEEN steps, not during one.
+        # A single step can consume its own per-step budget (≤ 600s by default)
+        # even after the run budget is exhausted — so worst-case total is
+        # max_seconds + max_seconds_per_step.  Add 120s for sandbox bookkeeping
+        # (browser close, response serialisation).  Never let the HTTP client
+        # race the sandbox to a timeout; the sandbox enforces its own limits.
+        http_timeout = max_seconds + 600 + 120  # 600 = max per-step default
+        async with httpx.AsyncClient(timeout=http_timeout) as client:
             r = await client.post(f"{handle.api_url}/run", json=body)
             if r.status_code >= 400:
                 raise RuntimeError(

@@ -47,7 +47,7 @@ class Settings(BaseSettings):
 
     # ----- LLM provider -----
     llm_provider: Literal["mock", "gemini", "anthropic", "openai"] = "gemini"
-    llm_model: str = "gemini-2.5-flash"
+    llm_model: str = "gemini-3-flash-preview"
     gemini_api_key: str | None = None
     anthropic_api_key: str | None = None
     openai_api_key: str | None = None
@@ -55,8 +55,8 @@ class Settings(BaseSettings):
     # ----- Sandbox runner -----
     sandbox_runner: Literal["local_docker", "modal", "fargate"] = "local_docker"
     sandbox_image: str = "agent-sandbox:latest"
-    sandbox_default_max_steps: int = 50
-    sandbox_default_max_seconds: int = 600
+    sandbox_default_max_steps: int = 120
+    sandbox_default_max_seconds: int = 1800
 
     # Optional: live-mount sandbox_agent/ for fast iteration without rebuilding
     sandbox_dev_mount: str | None = None
@@ -87,7 +87,7 @@ class Settings(BaseSettings):
 
     # ----- Storage / video processing -----
     local_storage_root: str = _DEFAULT_STORAGE
-    keyframe_extraction_fps: float = 0.5
+    keyframe_extraction_fps: float = 1
     keyframe_max_count: int = 120
 
     # ----- Backend HTTP server -----
@@ -100,8 +100,8 @@ class Settings(BaseSettings):
     auth_dev_mode: bool = True
 
     # ----- Budget defaults -----
-    default_max_model_calls_per_run: int = 50
-    default_max_usd_per_run: float = 2.00
+    default_max_model_calls_per_run: int = 80000
+    default_max_usd_per_run: float = 900.00
 
     def llm_env_for_sandbox(self) -> dict[str, str]:
         # API keys are intentionally NOT forwarded — the sandbox calls the

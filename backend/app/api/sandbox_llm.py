@@ -119,7 +119,9 @@ def _gemini_generate(req: LLMGenerateRequest) -> LLMGenerateResponse:
             img_bytes = base64.b64decode(img_b64)
         except Exception as e:
             raise HTTPException(400, f"bad base64 image: {e}")
-        parts.append(Part.from_bytes(data=img_bytes, mime_type="image/png"))
+        # Detect JPEG (FF D8) vs PNG (89 50) from magic bytes — Fix 7 sends JPEG.
+        mime_type = "image/jpeg" if img_bytes[:2] == b"\xff\xd8" else "image/png"
+        parts.append(Part.from_bytes(data=img_bytes, mime_type=mime_type))
     contents = [Content(role="user", parts=parts)]
 
     cfg: dict[str, Any] = {

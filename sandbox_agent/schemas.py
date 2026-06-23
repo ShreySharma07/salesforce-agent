@@ -76,9 +76,11 @@ class RunRequest(BaseModel):
     max_seconds: int = 600
     # Phase 2b: per-step ReAct budget. A UI step's loop runs at most this
     # many Reason->Act->Observe iterations before being marked failed.
-    max_iterations_per_step: int = 12
-    # Per-step wall-time ceiling in seconds.
-    max_seconds_per_step: int = 180
+    max_iterations_per_step: int = 70
+    # Per-step wall-time ceiling in seconds.  Must be well below max_seconds so
+    # the run budget is actually enforced; 300s (5 min) gives headroom for
+    # multi-field modal steps (New Task, record edit) without busting the run.
+    max_seconds_per_step: int = 400
 
 
 # ---------------------------------------------------------------------------
