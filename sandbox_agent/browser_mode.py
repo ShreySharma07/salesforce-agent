@@ -68,15 +68,17 @@ Rules:
       Specific record (by ID):   /lightning/r/<Object>/<RecordId>/view
       New-record form (modal):   /lightning/o/<Object>/new
     Reserve click/fill for actions that genuinely have NO URL equivalent: creating or editing records in modals, changing field values in forms, clicking buttons inside a record. Do NOT click the App Launcher or a list-view dropdown when `navigate` to a URL reaches the same destination.
-  - Emit `done` only when the GOAL is clearly accomplished, citing concrete on-page evidence.
   - Emit `give_up` only after the trajectory shows you genuinely cannot proceed (needed element absent, repeated failures).
   - If a previous action in the TRAJECTORY did not work, try a DIFFERENT approach — never repeat the same failed action.
   - Your ENTIRE response must be a single COMPLETE JSON object. Keep "thought" to one sentence so the JSON is never truncated. Never write long prose.
-  - In Salesforce Console, opening a record opens a NEW workspace tab next to the list tab. 
-After you open a record, you are ON the record — do NOT click the list tab again thinking 
-you need to navigate there; that takes you BACKWARD. If you see both a list tab and a 
-record tab, the record is already open; proceed with the task on the record (click 
+  - In Salesforce Console, opening a record opens a NEW workspace tab next to the list tab.
+After you open a record, you are ON the record — do NOT click the list tab again thinking
+you need to navigate there; that takes you BACKWARD. If you see both a list tab and a
+record tab, the record is already open; proceed with the task on the record (click
 Related, etc.). Only return to the list if the task explicitly requires another record.
+  - After an INLINE EDIT on a Salesforce record field (editing a field directly on the record page, not inside a modal), a docked form footer appears at the bottom of the page with Save and Cancel buttons. These are grounded in ELEMENTS as button 'Save' and button 'Cancel' (look in [FOOTER] or [MAIN] sections). Click their ref directly. If no ref appears for Save, use `click_text` with text "Save" — the footer is docked and always visible at the bottom; do NOT scroll to find it.
+  - `done` requires SPECIFIC, VISIBLE, ON-SCREEN EVIDENCE that you can see RIGHT NOW on the current page. Do NOT emit `done` immediately after clicking Save — always wait for the next observation to confirm the save actually succeeded. Required visible evidence for a save: a "Record saved" toast appearing, the field showing the new value in read-only (non-edit) mode, or the new record appearing in a list. "I clicked Save" is NOT evidence — the click may have failed silently or the save may still be in progress.
+  - For STATE-CHANGING steps (creating records, editing fields, saving forms): the step is only `done` after you observe visible confirmation the change PERSISTED — a success toast, the field updated to the new value in view mode, or the new item appearing in a list. A click on Save STARTS the save; it does NOT confirm it. Always observe the RESULT before emitting `done`.
 """
 
 
@@ -426,6 +428,23 @@ def _detect_stuck(trace: list[LoopIteration]) -> str:
                 f"control you want is not in the list, scroll or navigate instead."
             )
 
+
+    # Pattern D: consecutive scrolls that are not revealing new content.
+    # Scrolling cannot expose elements that are already rendered but live in
+    # closed shadow DOM without a ref. After 3 successive scrolls, tell the
+    # agent to use click_text / fill_field_by_label instead — both pierce
+    # shadow DOM — and remind it about the inline-edit docked footer Save.
+    if len(trace) >= 3 and all(it.action == "scroll" for it in trace[-3:]):
+        return (
+            "Scrolling has not revealed new elements. If you can SEE the target "
+            "on screen, use `click_text` with its visible text or "
+            "`fill_field_by_label` with its label — both pierce shadow DOM and "
+            "work for elements that have no #ref in ELEMENTS. "
+            "After an inline edit, the Save button is in a docked footer at the "
+            "bottom of the page — check ELEMENTS for a button named 'Save' "
+            "(it should have an sf#### ref), or use `click_text` \"Save\". "
+            "Do NOT scroll again."
+        )
 
     # Pattern A: identical action+args repeated and not working.
     same_action = (last.action == prev.action and last.action_args == prev.action_args)
@@ -814,6 +833,18 @@ def _execute_action(page: Page, kind: str, action: dict, grounding) -> str:
             ):
                 try:
                     loc.first.fill(text, timeout=3000)
+                    # Verify the field actually accepted the value. An empty result
+                    # after a non-empty fill means the LWC component cleared it or
+                    # this locator targeted the wrong element — try the next one.
+                    if text:
+                        try:
+                            actual = loc.first.evaluate(
+                                "(el) => el.value != null ? String(el.value) : (el.innerText || el.textContent || '')"
+                            )
+                            if not str(actual).strip():
+                                continue  # fill silently failed; try next locator
+                        except Exception:
+                            pass
                     return f"filled {label!r} with {text!r}"
                 except Exception:
                     pass
@@ -849,7 +880,22 @@ def _execute_action(page: Page, kind: str, action: dict, grounding) -> str:
     if kind == "fill":
         ref = str(action["ref"])
         text = str(action.get("text", ""))
-        _find_locator(page, ref).fill(text, timeout=2500)
+        loc = _find_locator(page, ref)
+        loc.fill(text, timeout=2500)
+        # Verify the field actually accepted the value — a silent empty result
+        # means the fill failed (field rejected it or is the wrong element type).
+        if text:
+            try:
+                actual = loc.evaluate(
+                    "(el) => el.value != null ? String(el.value) : (el.innerText || el.textContent || '')"
+                )
+                if not str(actual).strip():
+                    return (
+                        f"FAILED: field #{ref} is still empty after fill (expected {text!r}) "
+                        f"— the element may not accept direct fill; try fill_field_by_label instead"
+                    )
+            except Exception:
+                pass
         return f"filled element #{ref} with {len(text)} chars"
 
     if kind == "press":
