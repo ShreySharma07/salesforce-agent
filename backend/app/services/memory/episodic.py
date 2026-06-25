@@ -98,6 +98,42 @@ def capture_episodes(
                 run_id=run_id, step_id=step_id, goal=goal, occurred_at=now,
             ))
 
+        # --- scroll-stuck pattern ---
+        # When a step fails and the trace shows 5+ scroll actions, the root
+        # cause is almost certainly "agent couldn't ground a visible element
+        # and scrolled in place hoping it would appear". The wall-time timeout
+        # string recorded above is accurate but not actionable. Emit a SECOND
+        # episode with a concrete resolution so the next run gets a "do this
+        # instead" hint rather than "the step timed out (again)".
+        # A resolution-carrying episode is is_actionable=True on FIRST occurrence
+        # (bypasses the seen_count >= 2 threshold), so the agent benefits
+        # immediately on run 2 — not after a third failure.
+        if status == "failed":
+            scroll_actions = [it for it in trace if _se_get(it, "action", "") == "scroll"]
+            if len(scroll_actions) >= 5:
+                episodes.append(Episode(
+                    id=f"ep_{uuid.uuid4().hex[:10]}",
+                    user_id=user_id, kind=EpisodeKind.STEP_FAILURE,
+                    situation_key=sit,
+                    what_happened=(
+                        f"Agent scrolled {len(scroll_actions)}x searching for an "
+                        f"element that had no grounded ref — step timed out."
+                    ),
+                    resolution=(
+                        "If the target element is VISIBLE on screen but absent from "
+                        "ELEMENTS, use click_text with its exact visible text or "
+                        "fill_field_by_label with its label — both pierce shadow DOM "
+                        "without needing a ref. "
+                        "Do NOT scroll: scrolling cannot expose elements rendered "
+                        "in closed shadow roots. "
+                        "After an inline field edit, the Save button is in a docked "
+                        "form footer at the bottom of the record — look for a button "
+                        "named 'Save' in ELEMENTS (sf#### ref) or use "
+                        "click_text \"Save\" directly."
+                    ),
+                    run_id=run_id, step_id=step_id, goal=goal, occurred_at=now,
+                ))
+
         # --- captcha / pause reasons ---
         if pause_reason == "captcha":
             episodes.append(Episode(

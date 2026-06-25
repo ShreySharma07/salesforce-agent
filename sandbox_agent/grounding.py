@@ -371,6 +371,17 @@ def extract_from_page(page: Page, *, already_stable: bool = False) -> PageGround
     except Exception:
         pass
 
+    # Supplement: ground inline-edit docked-footer Save/Cancel buttons.
+    # After editing a field directly on a record (not in a modal), Salesforce
+    # renders a docked form footer (records-form-footer / .slds-docked-form-footer)
+    # with Save and Cancel buttons inside closed LWC shadow roots that
+    # EXTRACT_JS cannot traverse via collectShadow. Always run so these buttons
+    # are always grounded when present; existing_names guard prevents duplicates.
+    try:
+        _supplement_footer_save(page, els)
+    except Exception:
+        pass
+
     return PageGrounding(
         elements=els,
         viewport_w=vp.get("width", 0), viewport_h=vp.get("height", 0),
@@ -580,6 +591,63 @@ def _supplement_modal_inputs(page: Page, els: list[GroundedElement]) -> None:
                         in_viewport=True, region="main",
                         states=[], fillable=fillable, tag="input",
                     ))
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+
+def _supplement_footer_save(page: Page, els: list[GroundedElement]) -> None:
+    """Ground Salesforce docked-footer Save/Cancel buttons via the browser AX tree.
+
+    After an inline field edit on a record, SF renders a docked form footer
+    (records-form-footer / .slds-docked-form-footer / records-save-button) with
+    Save and Cancel buttons inside closed LWC shadow roots. EXTRACT_JS cannot
+    reach these via collectShadow because el.shadowRoot returns null on closed
+    roots. Playwright's get_by_role() uses the browser accessibility tree and
+    pierces all shadow boundaries, open or closed.
+
+    Only adds a button name if it is not already present in *els* (prevents
+    duplicating a Save button that EXTRACT_JS or _supplement_modal_inputs already
+    found — e.g. the Save inside a New Task modal). Uses 'sf####' refs so they
+    are distinct from FNV-hash, pw####, and fi#### refs.
+    """
+    existing_names = {e.name.lower().strip() for e in els}
+    existing_refs  = {e.ref for e in els}
+    vp = page.viewport_size or {"width": 1440, "height": 900}
+    counter = 0
+
+    for btn_name in ("Save", "Cancel"):
+        if btn_name.lower() in existing_names:
+            continue
+        try:
+            for loc in page.get_by_role("button", name=btn_name, exact=True).all():
+                try:
+                    bb = loc.bounding_box()
+                    if not bb or bb["width"] == 0 or bb["height"] == 0:
+                        continue
+                    if bb["y"] + bb["height"] < 0 or bb["y"] > vp["height"]:
+                        continue  # off-screen vertically
+                    ref = f"sf{counter:04d}"
+                    while ref in existing_refs:
+                        counter += 1
+                        ref = f"sf{counter:04d}"
+                    counter += 1
+                    try:
+                        loc.evaluate(f'(el) => el.setAttribute("data-agent-ref", "{ref}")')
+                    except Exception:
+                        pass
+                    existing_names.add(btn_name.lower())
+                    existing_refs.add(ref)
+                    in_vp = bb["y"] < vp["height"] and bb["y"] + bb["height"] > 0
+                    els.append(GroundedElement(
+                        ref=ref, role="button", name=btn_name, value="",
+                        x=int(bb["x"]), y=int(bb["y"]),
+                        w=int(bb["width"]), h=int(bb["height"]),
+                        in_viewport=in_vp, region="footer",
+                        states=[], fillable=False, tag="button",
+                    ))
+                    break  # one instance per name is sufficient
                 except Exception:
                     continue
         except Exception:
