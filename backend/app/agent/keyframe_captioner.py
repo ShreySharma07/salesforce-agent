@@ -10,7 +10,7 @@ than treating each frame in isolation. Massively reduces token usage.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from app.agent.video_processor import Keyframe, VideoManifest
 from app.core.llm.client import LLMClient
@@ -27,6 +27,7 @@ class FrameCaption:
     keyframe_index: int
     timestamp_seconds: float
     description: str
+    narration: str = field(default="")  # spoken narration overlapping this frame, if any
 
 
 CAPTION_SYSTEM_PROMPT = """You are watching a screen recording of someone performing a task on their computer. You will receive frames in chronological batches.
@@ -48,7 +49,15 @@ def caption_keyframes(
     *,
     storage: Storage | None = None,
     llm: LLMClient | None = None,
+    narration: "list | None" = None,
 ) -> list[FrameCaption]:
+    """
+    Caption keyframes, optionally enriched with voice narration.
+
+    *narration* is a list of NarrationSegment objects (from audio_transcriber).
+    When provided, each FrameCaption's .narration field is populated with
+    any narration spoken within ±2 s of that keyframe's timestamp.
+    """
     storage = storage or get_storage()
     llm = llm or get_llm_client()
 
@@ -93,6 +102,12 @@ def caption_keyframes(
 
         # Update rolling context with a brief summary of what we just saw.
         rolling_context = _summarize_for_context(captions[-len(batch):], rolling_context)
+
+    # Attach spoken narration to each frame when available.
+    if narration:
+        from app.agent.audio_transcriber import narration_at
+        for cap in captions:
+            cap.narration = narration_at(cap.timestamp_seconds, narration)
 
     return captions
 
