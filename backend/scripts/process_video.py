@@ -20,6 +20,7 @@ import sys
 import uuid
 from pathlib import Path
 
+from app.agent.audio_transcriber import transcribe_video
 from app.agent.keyframe_captioner import caption_keyframes, FRAMES_PER_BATCH
 from app.agent.plan_generator import generate_plan, regenerate_plan_from_intent
 from app.agent.video_processor import extract_keyframes
@@ -52,9 +53,16 @@ def main() -> int:
 
     src_key = f"videos/{video_id}/source{args.video.suffix}"
     storage.write_bytes(src_key, args.video.read_bytes())
-    print(f"\n[1/3] Stored source video at: {src_key}")
+    print(f"\n[1/4] Stored source video at: {src_key}")
 
-    print("[2/3] Extracting keyframes...")
+    print("[2/4] Transcribing audio narration...")
+    narration = transcribe_video(args.video)
+    if narration:
+        print(f"      {len(narration)} narration segments transcribed")
+    else:
+        print("      No narration found (silent video or no transcription backend available)")
+
+    print("[3/4] Extracting keyframes...")
     manifest = extract_keyframes(src_key, video_id=video_id, storage=storage)
     print(f"      {manifest.frame_count} keyframes from {manifest.duration_seconds}s video")
 
@@ -69,11 +77,11 @@ def main() -> int:
             print("Aborted.")
             return 0
 
-    print("[3a/3] Captioning frames...")
-    captions = caption_keyframes(manifest, storage=storage)
+    print("[4a/4] Captioning frames...")
+    captions = caption_keyframes(manifest, storage=storage, narration=narration or None)
     print(f"      {len(captions)} captions produced")
 
-    print("[3b/3] Synthesizing plan...")
+    print("[4b/4] Synthesizing plan...")
     plan = generate_plan(captions, source_video_id=video_id)
     print(f"      Plan: {plan.id} with {len(plan.steps)} steps")
 

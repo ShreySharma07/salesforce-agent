@@ -58,6 +58,10 @@ Rules:
   - Refer to elements only by the # ref shown in ELEMENTS. Never invent a ref.
   - If you can SEE an element in the screenshot but it has NO #ref in ELEMENTS (e.g. a Salesforce datatable case-number link that renders inside closed shadow DOM), use `click_text` with its exact visible label. Do NOT scroll — the element is already visible and scrolling will not add a ref for it.
   - To fill or select a modal/record form field, use `fill_field_by_label` with the field's visible label text (e.g. label="Due Date", text="6/20/2026"). This crosses shadow DOM for both text inputs and comboboxes/dropdowns. Do NOT use `click_text` on a label — labels are not interactive inputs. Use `fill_field_by_label` for Subject, Due Date, Comments, Status, and all other form fields regardless of whether they have a #ref.
+  - RECORD LOOKUP fields (Contact Name, Account Name, Owner, any field where you type a name and Salesforce searches for matching records) work differently from picklists. Typing text is NOT enough — Salesforce makes an async search and you must SELECT the matching record from the results list so it becomes a linked pill (a chip showing the record name). `fill_field_by_label` handles this automatically via its lookup path. The field is only set when the pill is visible. CRITICAL: if fill_field_by_label returns "no linked-record pill is visible" or "no matching record appeared", the field is NOT set — do NOT click Save and do NOT emit `done`. The pill must be visible before saving is valid.
+  - LOOKUP ALREADY SET: Before trying to fill a lookup field (Contact Name, Account, etc.), check whether the correct value is already showing as a pill. If fill_field_by_label returns "already shows … as a selected pill — already set", the field is done — do NOT re-search, do NOT click the field again. Move on to the next step.
+  - ABSOLUTE PROHIBITION — NEVER use the global/header search bar to fill a form field. The global search input at the top of every Salesforce page (aria-label "Search" / "Search Salesforce") navigates to a completely different record page and immediately abandons your current task and all in-progress form work. It is NEVER a substitute for a lookup field. `fill_field_by_label` targets the field's own search input inside the current form. If fill_field_by_label reports failure for a lookup, try once more with a simpler search term, then emit `give_up` — NEVER touch the global search bar. The `fill` action will BLOCK itself if you attempt this.
+  - WRONG-RECORD RECOVERY: After every action that could cause navigation (clicking a search result, a link, a tab), verify you are still on the correct record for the current step. If the URL or page heading shows you are on a DIFFERENT record type (e.g. you are on a Contact page when the task step is about a Case), STOP immediately — do not fill any more fields. Navigate back to the correct record using `navigate` with the case list URL, then re-open the target case by clicking its row link.
   - Use `dismiss_obstruction` when a modal, popup, overlay, toast, or cookie banner is in the way — pick the ref of its close/accept control. This action escalates automatically: it tries a normal click, then a FORCE click that bypasses an intercepting overlay, then hides the element as a last resort. So if a toast or banner keeps blocking clicks (e.g. "intercepts pointer events"), use `dismiss_obstruction` on its close button rather than repeatedly trying to click through it.
   - IMPORTANT — cosmetic toasts do NOT block you: a persistent error toast/banner (e.g. a telephony "Couldn't Connect", connection, or notification error) is usually cosmetic. It does NOT prevent navigation or clicking other elements. Do NOT spend turns trying to close it. Try your real target directly (click the App Launcher, navigate to the URL, etc.) — if that works, the toast was never blocking you. Only treat something as a real blocker if it is a large centered modal dialog covering the page content.
   - Do NOT dismiss UI that YOU opened: if you click something (App Launcher, a dropdown, a menu, a date picker) and a panel/menu appears, that panel is the RESULT of your click — interact with it (search/select inside it), do not `dismiss_obstruction` it. Dismissing what you just opened only undoes your own progress.
@@ -79,6 +83,32 @@ Related, etc.). Only return to the list if the task explicitly requires another 
   - After an INLINE EDIT on a Salesforce record field (editing a field directly on the record page, not inside a modal), a docked form footer appears at the bottom of the page with Save and Cancel buttons. These are grounded in ELEMENTS as button 'Save' and button 'Cancel' (look in [FOOTER] or [MAIN] sections). Click their ref directly. If no ref appears for Save, use `click_text` with text "Save" — the footer is docked and always visible at the bottom; do NOT scroll to find it.
   - `done` requires SPECIFIC, VISIBLE, ON-SCREEN EVIDENCE that you can see RIGHT NOW on the current page. Do NOT emit `done` immediately after clicking Save — always wait for the next observation to confirm the save actually succeeded. Required visible evidence for a save: a "Record saved" toast appearing, the field showing the new value in read-only (non-edit) mode, or the new record appearing in a list. "I clicked Save" is NOT evidence — the click may have failed silently or the save may still be in progress.
   - For STATE-CHANGING steps (creating records, editing fields, saving forms): the step is only `done` after you observe visible confirmation the change PERSISTED — a success toast, the field updated to the new value in view mode, or the new item appearing in a list. A click on Save STARTS the save; it does NOT confirm it. Always observe the RESULT before emitting `done`.
+
+=== REASONING DISCIPLINE — read every rule before acting ===
+
+RULE 1 — CHECK BEFORE ACTING: At iteration 1 of every step, BEFORE any action, look at the screenshot and ELEMENTS. If the goal is already fully satisfied — the target field already shows the correct value, the correct pill already exists, the record is already in the right state — emit `done` immediately with that visible evidence. Do NOT re-do work that is already done. The executor will also inject a mandatory goal-check reminder at step entry.
+
+RULE 2 — STOP WHEN SATISFIED: Once the step's target value is confirmed present, STOP. Do not keep editing a field that is already correct. fill_field_by_label will return "already set, no action needed" or "pill confirmed" — either observation means the field is done; emit `done` on the next turn. The executor will mechanically auto-succeed the step on certain definitive observations.
+
+RULE 3 — PREDICT NAVIGATION RISK before clicking any non-button element (links, record names, lookup pills, case numbers). Ask yourself: "Will clicking this EDIT data here, or NAVIGATE away?" If navigation is NOT this step's goal, do not click it. Specific prohibition: NEVER click a lookup pill or a record-name hyperlink to change a field value — those open the linked record and abandon the current page, wasting all in-progress work. To edit a lookup field, click the PENCIL icon next to the field to enter edit mode, then type in the field's OWN search input. This prediction overhead applies ONLY to potentially-navigating elements; labeled buttons (Save, Cancel, New Task) and known fill targets are safe to act on directly.
+
+RULE 4 — ELEMENT TYPE TAXONOMY (Salesforce): classify every element before acting:
+  • Lookup PILL / record-name link / case-number link → clicking NAVIGATES away (never click to edit; use the pencil icon)
+  • Pencil icon / "Edit" inline icon → click to ENTER edit mode for that specific field
+  • Lookup INPUT (visible once edit mode is open) → type here to SEARCH for records
+  • Picklist / combobox → click to open the dropdown, then click the target option
+  • Button with label (Save / Cancel / New Task / New) → PERFORMS an action, stays on current page
+  When unsure whether an element is a link or a button, check ELEMENTS — links carry navigation behavior; buttons have role="button" or are inside form footers.
+
+RULE 5 — CONTRADICTION CHECK: before every action, reconcile your intended action against the observed state. If the screen already shows the target value (pill present, field in read mode shows "Escalated", toast says "saved"), do NOT think "I need to set this" — that is a contradiction with what you can see. Re-read the goal, confirm it is satisfied, and emit `done`.
+
+RULE 6 — POST-ACTION VERIFICATION: after every Save / field-set / create action, the next iteration MUST observe the result before emitting `done`. A click on Save is not confirmation — the save may still be in flight or may have silently failed. Required evidence: a "Record saved" / "Changes saved" toast, a field switching from edit mode to read mode showing the new value, or a new record appearing in a list. Never emit `done` in the same iteration you clicked Save.
+
+RULE 7 — PLAN SCOPE: every action must serve the current step's stated goal. Do not invent sub-goals, do not explore the UI out of curiosity, do not navigate to unrelated pages. The only allowed deviation is recovery — e.g. navigating back to the correct record after an accidental detour. If you find yourself on a page or filling a field the step does not require, stop and recover immediately.
+
+RULE 8 — NEVER MODIFY CONFIGURATION: do NOT touch any Salesforce list-view filters, saved views, sort settings, column configuration, or any administrative setting. If a filtered list view (e.g. Acme Cases filtered to Status=New) is empty, that means no cases match today — it is a VALID and CORRECT result. Do NOT remove the filter, do NOT change the view, do NOT click "Edit" on the view to broaden it. Treat an empty filtered list as the final answer for the step.
+
+RULE 9 — LITERAL EXECUTION MODE: You are running a pre-approved plan, not discovering a task from scratch. Each step tells you EXACTLY what to do (action + target + value). Attempt that exact action FIRST. Do NOT explore the page, open menus, try alternative controls, or reason about other approaches UNLESS the specified action fails or is blocked. The pattern is: (1) attempt the planned action, (2) observe the result, (3) emit `done` if it worked, or recover minimally if it failed. Do not improvise beyond what recovery requires.
 """
 
 
@@ -531,6 +561,38 @@ def _render_trajectory(trace: list[LoopIteration]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Mechanical satisfaction helper
+# ---------------------------------------------------------------------------
+
+def _action_satisfied_goal(observation: str, step_intent: str, kind: str) -> bool:
+    """Return True if an action's observation is definitive proof that the
+    step's goal is already met — allowing immediate auto-succeed without
+    another LLM round.
+
+    Only fires for field-setting action kinds (fill_field_by_label, fill) to
+    avoid false-positives on navigation or generic click actions.
+    """
+    import re as _re
+    if kind not in ("fill_field_by_label", "fill"):
+        return False
+    obs_lower = observation.lower()
+    # Explicit success signals emitted by fill_field_by_label
+    if "pill confirmed" in obs_lower:
+        return True
+    if "already set, no action needed" in obs_lower:
+        return True
+    # Extract quoted target values from step_intent and check if confirmed
+    targets = _re.findall(r"['\"]([^'\"]{2,60})['\"]", step_intent)
+    for target in targets:
+        t_lower = target.lower()
+        if t_lower in obs_lower and any(
+            kw in obs_lower for kw in ("selected", "filled", "typed and selected")
+        ):
+            return True
+    return False
+
+
+# ---------------------------------------------------------------------------
 # The ReAct loop
 # ---------------------------------------------------------------------------
 
@@ -605,6 +667,16 @@ def execute_step(
         _stuck_nudge = _detect_stuck(trace)
         if _stuck_nudge:
             prompt_parts.append(_stuck_nudge)
+        if iteration == 1:
+            prompt_parts.append(
+                "MANDATORY STEP-ENTRY GOAL CHECK: This is your FIRST observation for this "
+                "step. Before choosing any action, examine the screenshot and ELEMENTS "
+                "carefully. If the step goal is already fully satisfied — the target field "
+                "already shows the correct value, the correct lookup pill already exists, "
+                "the record is already in the right state — emit `done` immediately with "
+                "specific visible evidence. Do NOT take any action on a goal that is "
+                "already met on screen."
+            )
         prompt_parts.append("Emit one action as JSON.")
         prompt = "\n\n".join(prompt_parts)
 
@@ -747,6 +819,18 @@ def execute_step(
             observation = ""
             err = f"{type(e).__name__}: {e}"
 
+        # Stop-when-satisfied (mechanical): if the action itself returned a
+        # definitive success observation confirming the step's goal value is
+        # set, auto-succeed without another LLM round.  See RULE 2 in SYSTEM_PROMPT.
+        if err is None and _action_satisfied_goal(observation, step_intent, kind):
+            trace.append(LoopIteration(
+                iteration=iteration, thought=thought, action=kind,
+                action_args=action_args, observation=observation, error=None,
+                screenshot_ref=screenshot_ref, input_tokens=in_tok, output_tokens=out_tok,
+                latency_ms=int((time.monotonic() - iter_start) * 1000),
+            ))
+            return _result("succeeded", f"[auto] {observation}", trace)
+
         trace.append(LoopIteration(
             iteration=iteration, thought=thought, action=kind,
             action_args=action_args, observation=observation, error=err,
@@ -758,10 +842,96 @@ def execute_step(
 
 
 # ---------------------------------------------------------------------------
+# Lookup-field helpers
+# ---------------------------------------------------------------------------
+
+def _poll_for_option(page: "Page", text: str, *, deadline_s: float = 3.0):
+    """Poll up to *deadline_s* seconds for a [role=option] matching *text* to
+    become visible in the page.  Returns the first matching Locator, or None."""
+    deadline = time.time() + deadline_s
+    while time.time() < deadline:
+        for exact in (True, False):
+            try:
+                loc = page.get_by_role("option", name=text, exact=exact).first
+                loc.wait_for(state="visible", timeout=400)
+                return loc
+            except Exception:
+                pass
+        time.sleep(0.3)
+    return None
+
+
+def _verify_lookup_pill(page: "Page") -> bool:
+    """Return True when a Salesforce lookup field shows a selected-record pill.
+
+    Salesforce renders a chosen lookup record as a 'pill' — a linked chip that
+    replaces the search input.  We check three different DOM signals that can
+    indicate a pill is present across different SF LWC component versions.
+    """
+    try:
+        return bool(page.evaluate("""
+            () => {
+                if (document.querySelector('lightning-pill, .slds-pill')) return true;
+                if (document.querySelector('[role="option"][aria-selected="true"]')) return true;
+                if (document.querySelector(
+                    '.slds-combobox.slds-has-selection, ' +
+                    '.slds-combobox_container .slds-has-selection, ' +
+                    '[data-selected-value]'
+                )) return true;
+                return false;
+            }
+        """))
+    except Exception:
+        return False
+
+
+def _lookup_pill_has_value(page: "Page", text: str) -> bool:
+    """Return True if a lookup pill showing *text* already exists on the page.
+
+    Used as a pre-check: if the field is already correctly set, skip all search
+    interaction so we don't disturb an existing pill value.
+    """
+    try:
+        for loc in [page.locator("lightning-pill"), page.locator(".slds-pill")]:
+            if loc.filter(has_text=text).count() > 0:
+                return True
+        return False
+    except Exception:
+        return False
+
+
+def _is_global_search_bar(loc) -> bool:
+    """Return True if *loc* resolves to the page-level Salesforce search bar.
+
+    The global search bar lives inside lightning-global-header / one-global-header.
+    Typing into it triggers navigation to a record page, abandoning the current task.
+    We block it in the `fill` handler to prevent catastrophic detours.
+    """
+    try:
+        return bool(loc.evaluate("""
+            el => {
+                let node = el;
+                while (node && node !== document.body) {
+                    const tag = (node.tagName || '').toLowerCase();
+                    if (tag === 'lightning-global-header' ||
+                        tag === 'one-global-header' ||
+                        tag === 'lightning-app-nav-bar') return true;
+                    if (node.getAttribute && node.getAttribute('role') === 'banner')
+                        return true;
+                    node = node.parentElement || node.parentNode;
+                }
+                return false;
+            }
+        """))
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------------------
 # Action execution
 # ---------------------------------------------------------------------------
 
-def _find_locator(page: Page, ref: str):
+def _find_locator(page: "Page", ref: str):
     """Return a Playwright Locator for [data-agent-ref=ref].
 
     Checks the main frame first, then all child frames (covers iframe elements
@@ -823,9 +993,14 @@ def _execute_action(page: Page, kind: str, action: dict, grounding) -> str:
         if not label:
             return "FAILED: fill_field_by_label requires a non-empty 'label'"
 
-        # --- textbox path (text input, date field, textarea) ---
-        # get_by_label uses the <label> element association; get_by_role("textbox")
-        # uses the AX accessible name — both pierce shadow DOM.
+        # Pre-check: if a lookup pill already shows the target text, the field is
+        # already correctly set — skip all interaction to avoid disturbing the pill.
+        if text and _lookup_pill_has_value(page, text):
+            return f"{label!r} already shows {text!r} as a selected pill — already set, no action needed"
+
+        # --- textbox path (text inputs, date fields, textareas, and lookup inputs) ---
+        # After a successful fill, poll briefly: if a results dropdown appeared this
+        # is a lookup field and we must click the matching option to create the pill.
         for exact in (True, False):
             for loc in (
                 page.get_by_label(label, exact=exact),
@@ -833,9 +1008,7 @@ def _execute_action(page: Page, kind: str, action: dict, grounding) -> str:
             ):
                 try:
                     loc.first.fill(text, timeout=3000)
-                    # Verify the field actually accepted the value. An empty result
-                    # after a non-empty fill means the LWC component cleared it or
-                    # this locator targeted the wrong element — try the next one.
+                    # Verify the field accepted the value (rejects silently cleared fields).
                     if text:
                         try:
                             actual = loc.first.evaluate(
@@ -845,24 +1018,47 @@ def _execute_action(page: Page, kind: str, action: dict, grounding) -> str:
                                 continue  # fill silently failed; try next locator
                         except Exception:
                             pass
+                    # Lookup detection: if a dropdown appeared after the fill, click the
+                    # matching option to create the pill — a bare fill is not enough.
+                    post_fill_opt = _poll_for_option(page, text, deadline_s=1.5)
+                    if post_fill_opt is not None:
+                        post_fill_opt.click(timeout=2000)
+                        time.sleep(0.5)
+                        if _verify_lookup_pill(page):
+                            return f"selected lookup record {text!r} for {label!r} (pill confirmed)"
+                        # Option was clicked but pill uncertain — still report success
+                        # (pill check may miss some SF LWC variants) and let agent verify visually.
+                        return f"filled {label!r} with {text!r} and selected from dropdown"
                     return f"filled {label!r} with {text!r}"
                 except Exception:
                     pass
 
-        # --- combobox / select path (Status, Subject picklists) ---
+        # --- combobox / select path (picklists, Subject, and record lookups) ---
+
+        # Pre-check: options may already be visible from a prior "Edit X" click.
+        # Re-clicking the combobox would CLOSE an already-open dropdown — pick directly.
+        for opt_exact in (True, False):
+            try:
+                page.get_by_role("option", name=text, exact=opt_exact).first.click(timeout=1000)
+                return f"selected {text!r} (dropdown was already open)"
+            except Exception:
+                pass
+
         for exact in (True, False):
             try:
                 combo = page.get_by_role("combobox", name=label, exact=exact).first
                 combo.click(timeout=3000)
                 _wait_for_lwc_panel(page)
-                # Click the matching option in the opened dropdown
+
+                # Path A: picklist — static options already loaded after click
                 for opt_exact in (True, False):
                     try:
                         page.get_by_role("option", name=text, exact=opt_exact).first.click(timeout=2000)
                         return f"selected {text!r} in {label!r}"
                     except Exception:
                         pass
-                # Subject-style: type to filter, then pick the top suggestion
+
+                # Path B: Subject-style type-to-filter — fast local filtering
                 try:
                     combo.fill(text, timeout=2000)
                     time.sleep(0.4)
@@ -870,6 +1066,35 @@ def _execute_action(page: Page, kind: str, action: dict, grounding) -> str:
                     return f"typed and selected {text!r} in {label!r}"
                 except Exception:
                     pass
+
+                # Path C: record-lookup — real keyboard events (keydown/keyup) to fire
+                # the async SOQL search. combo.fill() sends a synthetic event that SF
+                # lookup components may ignore; keyboard.type() dispatches the real thing.
+                try:
+                    try:
+                        combo.locator("input").first.click(timeout=1500)
+                        combo.locator("input").first.triple_click(timeout=1000)
+                    except Exception:
+                        combo.click(timeout=2000)
+                    page.keyboard.type(text, delay=60)   # char-by-char → SOQL search fires
+                    option_loc = _poll_for_option(page, text, deadline_s=4.0)
+                    if option_loc is None:
+                        return (
+                            f"typed {text!r} into lookup field {label!r} but no search "
+                            f"results appeared after 4s — record may not exist or "
+                            f"spelling is wrong; do NOT use global search as a substitute"
+                        )
+                    option_loc.click(timeout=2000)
+                    time.sleep(0.5)
+                    if _verify_lookup_pill(page):
+                        return f"selected lookup record {text!r} in {label!r} (pill confirmed)"
+                    return (
+                        f"typed {text!r} into lookup {label!r} and clicked a result "
+                        f"but no linked-record pill appeared — field NOT set; do NOT Save"
+                    )
+                except Exception:
+                    pass
+
                 return (f"opened {label!r} combobox but could not select {text!r} "
                         f"— check available options or use click_text on the option")
             except Exception:
@@ -881,6 +1106,14 @@ def _execute_action(page: Page, kind: str, action: dict, grounding) -> str:
         ref = str(action["ref"])
         text = str(action.get("text", ""))
         loc = _find_locator(page, ref)
+        # Guard: block the page-level global search bar — typing into it navigates
+        # away from the current record, abandoning all in-progress form work.
+        if _is_global_search_bar(loc):
+            return (
+                "BLOCKED: that element is the global Salesforce search bar. "
+                "Filling it navigates to a different record and abandons the current task. "
+                "To set a lookup/contact field, use fill_field_by_label with the field's label."
+            )
         loc.fill(text, timeout=2500)
         # Verify the field actually accepted the value — a silent empty result
         # means the fill failed (field rejected it or is the wrong element type).

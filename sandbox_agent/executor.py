@@ -216,26 +216,77 @@ def _run_loop(
     body_ids: list[str] = step.details.get("body", [])
     max_iters = int(step.details.get("max_iterations", 50))
 
-    items = _resolve_loop_items(over_expr, variables)
-    if not items:
-        return [StepResult(
-            step_id=step.id, status="succeeded",
-            detail=f"loop over '{over_expr}' — 0 items, nothing executed",
-        )]
+    is_drain = (over_expr == "__drain__")
+
+    if not is_drain:
+        items = _resolve_loop_items(over_expr, variables)
+        if not items:
+            return [StepResult(
+                step_id=step.id, status="succeeded",
+                detail=f"loop over '{over_expr}' — 0 items, nothing executed",
+            )]
+    else:
+        items = []  # not used in drain mode
 
     results: list[StepResult] = []
-    for idx, item in enumerate(items[:max_iters]):
-        variables[item_var] = item
-        variables[f"{item_var}_index"] = idx
-        for sid in body_ids:
+    loop_range = range(max_iters) if is_drain else range(min(len(items), max_iters))
+
+    for loop_idx in loop_range:
+        if is_drain:
+            variables["drain_iteration"] = loop_idx
+        else:
+            variables[item_var] = items[loop_idx]
+            variables[f"{item_var}_index"] = loop_idx
+
+        abort_loop = False
+        for body_idx, sid in enumerate(body_ids):
             body_step = step_by_id.get(sid)
             if body_step is None:
                 continue
+
+            # Dispatch nested DECISION/LOOP steps so they are not treated as UI steps.
+            if body_step.kind == StepKind.DECISION:
+                nested = _run_decision(body_step, step_by_id, page, llm, req, variables)
+                for r in nested:
+                    results.append(r)
+                    if r.status in ("failed", "paused"):
+                        return results
+                continue
+
+            if body_step.kind == StepKind.LOOP:
+                nested = _run_loop(body_step, step_by_id, page, llm, req, variables)
+                for r in nested:
+                    results.append(r)
+                    if r.status in ("failed", "paused"):
+                        return results
+                continue
+
             result = _run_step(page, llm, body_step, req, variables=variables)
+
+            # Drain sentinel: first body step failing means the list is now empty.
+            # Return a succeeded loop result so the run continues past the loop.
+            if is_drain and body_idx == 0 and result.status == "failed":
+                return results + [StepResult(
+                    step_id=step.id,
+                    status="succeeded",
+                    detail=f"drain loop complete after {loop_idx} iteration(s): no more rows in list",
+                )]
+
             results.append(result)
             variables.update(result.extracted)
-            if result.status in ("failed", "paused"):
-                return results  # abort loop on first failure
+
+            on_fail = (body_step.on_failure or "pause").lower()
+            if result.status == "paused":
+                return results  # always propagate paused
+            if result.status == "failed":
+                if on_fail == "continue":
+                    continue  # step says continue despite failure
+                abort_loop = True
+                break
+
+        if abort_loop:
+            return results
+
     return results
 
 

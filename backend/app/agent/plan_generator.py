@@ -121,7 +121,133 @@ Navigation Rules (critical for Salesforce and web apps):
   - A plan that edits or sets a field via inline edit MUST end with a Save
     step (kind "ui_action", intent "click", target_description "Save") so
     the change is persisted.
+
+Authentication Rules (CRITICAL — never skip):
+  - Authentication is ALWAYS handled by the single open_app step above.
+    NEVER emit steps that perform manual login, regardless of what the
+    recording or narration shows.
+  - Specifically, NEVER emit any step that:
+      • navigates to login.salesforce.com or any URL containing "/login"
+      • types a username, email address, or password into a field
+      • clicks a "Log In", "Sign In", "Next", or "Continue" button on a
+        login / identity / SSO page
+  - If the recording begins on a login page, or the narration says "every
+    morning I log into Salesforce" / "I open Salesforce" / "I log in first":
+    treat that entire login sequence as already satisfied by open_app.
+    Strip it — do not include it anywhere in the plan's steps array.
+  - The first step after open_app must be a navigate or ui_action that
+    operates inside the authenticated Salesforce app (e.g. navigating to a
+    list view), never a step on a pre-auth page.
+
+Recurrence and Loop Generalization Rules:
+  - When narration expresses RECURRENCE or iteration — phrases like
+    "every morning", "I do this for each / any / every", "any new case",
+    "whenever there is a case", "for all cases that", "the moment I see a
+    new X" — the plan MUST GENERALIZE rather than hardcode the single
+    example record shown in the recording.
+  - NEVER hardcode a specific case/record number (e.g. 00001386, 00001382)
+    when narration says the action applies to "any", "every", or "all"
+    matching records. That number is just the demo example; the real
+    automation runs on every qualifying record.
+  - Correct pattern when narration expresses "for each matching record":
+      1. `navigate` — to the filtered list view URL.
+      2. `extract` — variable_name "<plural>_list" (e.g. "new_cases"),
+         description quoting the EXACT filter criterion from the narration
+         (e.g. "All Cases with Status=New in the Acme Cases list view").
+      3. `loop`    — over "${<plural>_list}", item_variable matching the
+         record type (e.g. "case"), body = [step_ids of the per-item
+         actions that follow].
+      4. Loop body steps — the per-item actions (click row link, inspect,
+         fill fields, save) exactly as demonstrated for the one example
+         case, renumbered sequentially after the loop step.
+  - The extract step's description must capture the narration's filter
+    verbatim. Example: narration "any new case with status New for Acme" →
+    description "All Cases with Status=New in the Acme Cases list view".
+  - Add a decision_rule explaining the filter criterion and cite the
+    narration phrase that established it.
+  - LOOP BODY COMPLETENESS (critical): when restructuring into a loop,
+    the loop body MUST contain EVERY per-item action from the source —
+    do NOT drop, merge, or simplify steps. Every field fill, every status
+    change, every Save, and every assignee/contact update that existed in
+    the detailed single-case plan must appear inside the loop body. The
+    loop body is simply the original per-case sequence parameterised for
+    the loop variable — nothing may be omitted to save space.
+  - PEOPLE AND ROLES must never be conflated. A recording may involve
+    multiple distinct people with distinct roles:
+      • A CASE CONTACT is the person who reported or owns the case
+        (updated via the Contact Name field ON THE CASE RECORD).
+      • A TASK ASSIGNEE is the person who must perform the follow-up action
+        (set via the Name / Assigned To field ON THE TASK form).
+    If narration mentions two people in different roles, emit separate steps
+    for each: one updating the case's Contact Name, one setting the task's
+    Name/Assigned-To. Never merge these into a single step or omit one.
+
+  - DRAIN-THE-QUEUE PATTERN (use instead of extract-then-iterate whenever the
+    list is pre-filtered and processed items exit the filter automatically):
+    When a recording shows the user working through a filtered list where each
+    processed record will change status and thereby leave the filter (e.g. a
+    Status=New list where processing sets Status=Escalated), use the drain
+    pattern:
+      1. `navigate` — to the pre-filtered list URL (before the loop).
+      2. `loop` — details.over = "__drain__", no item_variable needed. Loop
+         body must be:
+           a. First step: a `ui_action` that clicks the FIRST ROW LINK in
+              the list (e.g. "first case row link in the Acme Cases list").
+              This is the DRAIN SENTINEL — when the list is empty this step
+              fails and the executor treats it as "loop complete" (success).
+           b. Middle steps: completion check + per-item processing.
+           c. LAST step (mandatory): a `navigate` step back to the filtered
+              list URL. This reloads the filtered list so the next drain
+              iteration sees the updated rows. The loop will NOT work correctly
+              without this final navigate-back step.
+      DO NOT emit an `extract` step before the loop to pre-enumerate items.
+      There is nothing to enumerate upfront — the sentinel first step handles
+      empty-list detection.
+
+  - COMPLETION CHECK (resumability / idempotency): Inside the drain loop body,
+    add immediately after the first-row-click step:
+      1. `extract` — variable_name "has_<marker>_task", on_failure "continue".
+         Description: instruct the agent to check the Related tab or Activities
+         section for the task that marks full case completion (e.g. a task with
+         Subject='Call'). Agent should respond ONLY 'YES' or 'NO'.
+      2. `decision` — condition "'YES' in str(has_<marker>_task).upper()",
+         if_true = [] (empty — skip processing; the unconditional navigate-back
+         at the end of the body still runs), if_false = [all processing step
+         IDs].
+      The navigate-back step is ALWAYS the last step in the loop body (not
+      inside the decision's branches) so it runs unconditionally every
+      iteration whether the case was skipped or processed.
+
+Voice Narration Rules (when NARRATION lines are present in the timeline):
+  - NARRATION lines contain the user's spoken explanation of what they were
+    doing at that moment. This is the most reliable signal for INTENT —
+    treat it as the user's own annotation of the recording.
+  - When a NARRATION line states the purpose of an action (e.g. "now I'm
+    selecting the case assigned to Acme to check the SLA status"), use that
+    stated purpose in the step's "description" and "intent" fields verbatim
+    where possible. Do not invent intent from visual inference alone when
+    narration provides it directly.
+  - When narration mentions a specific value, name, status, or date, treat
+    it as ground truth over anything inferred from a blurry or cropped frame.
+  - When narration describes an upcoming action ("I'm about to click New
+    Task"), map it to the next visual action in the timeline.
+  - When narration and visual disagree (e.g. narration says "close the
+    modal" but the frame shows no modal), trust the narration — the frame
+    may be from just before or after the UI transition.
+  - NARRATION is optional: many frames will have no NARRATION line. In
+    that case, infer intent from the visual description as normal.
 """
+
+
+def _build_timeline(captions: list[FrameCaption]) -> str:
+    """Format captions into the prompt timeline, including narration when present."""
+    lines = []
+    for c in captions:
+        line = f"[{c.timestamp_seconds:>6.2f}s] VISUAL: {c.description}"
+        if c.narration:
+            line += f'\n{"":>12}NARRATION: "{c.narration}"'
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def generate_plan(
@@ -133,9 +259,7 @@ def generate_plan(
     """Synthesize a Plan from per-frame captions."""
     llm = llm or get_llm_client()
 
-    timeline = "\n".join(
-        f"[{c.timestamp_seconds:>6.2f}s] {c.description}" for c in captions
-    )
+    timeline = _build_timeline(captions)
     prompt = (
         "Captions of the recorded task, in order:\n\n"
         f"{timeline}\n\n"
@@ -147,7 +271,7 @@ def generate_plan(
         purpose="plan_synthesis",
         system=PLAN_SYSTEM_PROMPT,
         json_mode=True,
-        max_tokens=4000,
+        max_tokens=8192,
     )
 
     plan_data = _parse_plan_json(response.text)
@@ -164,9 +288,7 @@ def regenerate_plan_with_feedback(
     """Take a previous plan + the user's correction, ask the LLM to revise."""
     llm = llm or get_llm_client()
 
-    timeline = "\n".join(
-        f"[{c.timestamp_seconds:>6.2f}s] {c.description}" for c in captions
-    )
+    timeline = _build_timeline(captions)
     prompt = (
         "Captions of the recorded task:\n\n"
         f"{timeline}\n\n"
@@ -200,17 +322,30 @@ def regenerate_plan_with_feedback(
 # ---------------------------------------------------------------------------
 
 def _parse_plan_json(text: str) -> dict:
+    import re
     t = text.strip()
     if t.startswith("```"):
         lines = t.splitlines()[1:]
         if lines and lines[-1].strip().startswith("```"):
             lines = lines[:-1]
         t = "\n".join(lines).strip()
+
+    # First attempt: parse as-is.
     try:
         return json.loads(t)
+    except json.JSONDecodeError:
+        pass
+
+    # Second attempt: strip trailing commas before ] or } (common LLM mistake).
+    repaired = re.sub(r",\s*([}\]])", r"\1", t)
+    try:
+        return json.loads(repaired)
     except json.JSONDecodeError as e:
         raise RuntimeError(
-            f"Plan generator: model output was not valid JSON. Got:\n{text[:1000]}"
+            f"Plan generator: model output was not valid JSON "
+            f"(tried trailing-comma repair too). "
+            f"First 1000 chars:\n{text[:1000]}\n"
+            f"JSON error: {e}"
         ) from e
 
 
@@ -277,9 +412,7 @@ def regenerate_plan_from_intent(
     llm = llm or get_llm_client()
  
     if captions:
-        timeline = "\n".join(
-            f"[{c.timestamp_seconds:>6.2f}s] {c.description}" for c in captions
-        )
+        timeline = _build_timeline(captions)
         anchor = f"Captions of the recorded task:\n\n{timeline}\n\n"
         faithfulness = (
             "Stay faithful to the DEMONSTRATED actions in the captions. Apply the "
