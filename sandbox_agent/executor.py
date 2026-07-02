@@ -621,6 +621,7 @@ def _run_sequence_step(
     seq_trace: list[LoopIteration] = []
     for idx, sub in enumerate(sub_actions, start=1):
         sub_kind = sub.get("kind", "")
+        sub_started = time.monotonic()
         obs = browser_mode.execute_sequence_sub_action(page, sub_kind, sub)
         observations.append(f"[{sub_kind}] {obs}")
         seq_trace.append(LoopIteration(
@@ -629,6 +630,7 @@ def _run_sequence_step(
             action_args={k: v for k, v in sub.items() if k != "kind"},
             observation=obs,
             error="sub_action_failed" if obs.startswith("FAILED") else None,
+            latency_ms=int((time.monotonic() - sub_started) * 1000),
         ))
         if obs.startswith("FAILED"):
             prior = (" — prior: " + "; ".join(observations[:-1])) if len(observations) > 1 else ""
