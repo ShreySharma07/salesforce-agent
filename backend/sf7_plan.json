@@ -1,7 +1,7 @@
 {
   "id": "plan_ac3759ca42",
   "automation_id": null,
-  "version": 5,
+  "version": 6,
   "status": "approved",
   "goal": "Automatically process new Acme cases by updating the contact name, escalating the status, and creating a follow-up task assigned to Shrey Sharma.",
   "summary": "This plan automates the daily triage of new cases for the Acme account. It navigates to the Acme Cases list view and drains it: for each case it extracts the contact name, sets the Contact Name field, escalates Status to Escalated, and creates a Call task. Every state-changing step carries a success_condition so it self-skips if the target state is already present, making each iteration idempotent for any partial-completion state.",
@@ -89,7 +89,7 @@
         "intent": "click",
         "target_description": "Save button on the Case Details inline-edit footer"
       },
-      "success_condition": "The Contact Name field is in read-only view mode — no inline-edit Save/Cancel footer is active on the page",
+      "success_condition": "The Contact Name field shows '${contact_name}' as a linked-record pill in read-only view — the saved value is visible, not merely that the Save/Cancel footer is gone",
       "on_failure": "pause"
     },
     {
@@ -98,6 +98,7 @@
       "description": "Set Case Status to Escalated via inline picklist",
       "details": {
         "steps": [
+          {"kind": "click_pencil_icon", "target": "Status"},
           {"kind": "select_dropdown_option", "label": "Status", "value": "Escalated"}
         ]
       },
@@ -112,7 +113,7 @@
         "intent": "click",
         "target_description": "Save button on the Case Details inline-edit footer"
       },
-      "success_condition": "The Status field shows 'Escalated' in read-only view mode — no inline-edit Save/Cancel footer is active on the page",
+      "success_condition": "The Status field shows 'Escalated' in read-only view — the saved value is visible, not merely that the Save/Cancel footer is gone",
       "on_failure": "pause"
     },
     {
