@@ -29,6 +29,7 @@ class StepKind(str, Enum):
     LOOP = "loop"                    # repeat a sub-plan over a collection
     HUMAN_INPUT = "human_input"      # explicit pause for human input
     NOTIFY = "notify"                # send a message (Slack, email, etc.)
+    SEQUENCE = "sequence"            # deterministic ordered sub-actions (no LLM)
 
 
 class UIActionDetails(BaseModel):
@@ -109,6 +110,18 @@ class Step(BaseModel):
     details: dict[str, Any] = Field(
         default_factory=dict,
         description="Kind-specific details — see *Details classes above",
+    )
+    # Plain-English description of the state this step must produce.
+    # The executor checks this BEFORE acting (skip if already true) and
+    # AFTER acting (verify before emitting done).  Omit for non-state-
+    # changing steps (navigate, wait, extract, control-flow).
+    success_condition: str | None = Field(
+        None,
+        description=(
+            "Target end-state for this step, e.g. "
+            "'Status field shows Escalated in read-only view'. "
+            "Checked before acting (idempotency) and after (verification)."
+        ),
     )
     on_failure: Literal["pause", "skip", "abort", "retry"] = "pause"
 

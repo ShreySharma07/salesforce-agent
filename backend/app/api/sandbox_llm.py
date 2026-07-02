@@ -206,16 +206,123 @@ def _gemini_generate(req: LLMGenerateRequest) -> LLMGenerateResponse:
     )
 
 
+def _claude_generate(req: LLMGenerateRequest) -> LLMGenerateResponse:
+    """Call Claude (Anthropic) using the backend's configured key. Synchronous —
+    wrapped in a threadpool by FastAPI since the route is declared sync."""
+    import anthropic
+
+    settings = get_settings()
+    if not settings.anthropic_api_key:
+        raise HTTPException(500, "backend has no ANTHROPIC_API_KEY configured")
+
+    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+    model = settings.llm_model  # e.g. "claude-sonnet-4-6"
+
+    # Build the user content block: images first, then the text prompt.
+    # Claude processes images before text so spatial reasoning sees the
+    # screenshot before reading the elements/goal.
+    content: list[Any] = []
+    for img_b64 in req.images_b64:
+        try:
+            img_bytes = base64.b64decode(img_b64)
+        except Exception as e:
+            raise HTTPException(400, f"bad base64 image: {e}")
+        mime_type = "image/jpeg" if img_bytes[:2] == b"\xff\xd8" else "image/png"
+        content.append({
+            "type": "image",
+            "source": {"type": "base64", "media_type": mime_type, "data": img_b64},
+        })
+    content.append({"type": "text", "text": req.prompt})
+
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "max_tokens": req.max_tokens,
+        "messages": [{"role": "user", "content": content}],
+    }
+    if req.system:
+        kwargs["system"] = req.system
+
+    start = time.monotonic()
+    max_retries = 3
+    last_exc: Exception | None = None
+    for attempt in range(max_retries + 1):
+        try:
+            raw = client.messages.create(**kwargs)
+            last_exc = None
+            break
+        except Exception as exc:
+            last_exc = exc
+            err = str(exc)
+
+            is_daily_quota = "daily" in err.lower() and "quota" in err.lower()
+            if is_daily_quota:
+                log.warning("daily LLM quota exhausted (Claude) — failing fast")
+                raise QuotaExhaustedError(
+                    "LLM daily quota exhausted; the run cannot continue today"
+                ) from exc
+
+            transient = (
+                "429" in err or "529" in err
+                or "503" in err or "502" in err
+                or "rate_limit" in err.lower()
+                or "overloaded" in err.lower()
+                or "apiconnectionerror" in err.lower()
+                or "apitimeouterror" in err.lower()
+                or "connection error" in err.lower()
+                or "connection reset" in err.lower()
+                or "timed out" in err.lower()
+                or "temporarily unavailable" in err.lower()
+            )
+            if attempt < max_retries and transient:
+                wait = 2.0 * (attempt + 1)
+                log.warning("transient Claude error (attempt %d), retrying in %.1fs: %s",
+                            attempt + 1, wait, err[:200])
+                time.sleep(wait)
+                continue
+            raise
+    latency_ms = int((time.monotonic() - start) * 1000)
+
+    if last_exc is not None:
+        raise last_exc
+
+    text = "".join(b.text for b in raw.content if hasattr(b, "text"))
+
+    # If json_mode was requested but the response has prose around the JSON,
+    # strip it — Claude follows the system prompt's JSON-only instruction
+    # reliably but may occasionally wrap it in a code fence on a retry.
+    if req.json_mode and text:
+        stripped = text.strip()
+        if stripped.startswith("```"):
+            lines = stripped.splitlines()[1:]
+            if lines and lines[-1].strip().startswith("```"):
+                lines = lines[:-1]
+            text = "\n".join(lines).strip()
+        if not stripped.startswith("{"):
+            m = re.search(r"\{.*\}", stripped, re.DOTALL)
+            if m:
+                text = m.group(0)
+
+    return LLMGenerateResponse(
+        ok=True, text=text,
+        input_tokens=raw.usage.input_tokens,
+        output_tokens=raw.usage.output_tokens,
+        latency_ms=latency_ms,
+    )
+
+
 @router.post("/generate", response_model=LLMGenerateResponse)
 async def generate(
     req: LLMGenerateRequest,
     authorization: str | None = Header(default=None),
 ) -> LLMGenerateResponse:
     await _validate_run_token(req.run_id, authorization)
+    settings = get_settings()
+    provider = settings.llm_provider
+    _fn = _claude_generate if provider == "anthropic" else _gemini_generate
     try:
-        # _gemini_generate is sync + blocking; run it off the event loop.
+        # Both generators are sync + blocking; run off the event loop.
         import anyio
-        return await anyio.to_thread.run_sync(_gemini_generate, req)
+        return await anyio.to_thread.run_sync(_fn, req)
     except HTTPException:
         raise
     except QuotaExhaustedError as e:
