@@ -1199,11 +1199,61 @@ def execute_sequence_sub_action(page: "Page", kind: str, sub: dict) -> str:
     return fn()
 
 
+# The label of the field the last fill_field typed into — lets
+# click_dropdown_result scope its option search to that same combobox
+# instead of matching options anywhere on the page.
+_LAST_SEQ_FILL: dict[str, str | None] = {"label": None}
+
+
+def _seq_advanced_search_guard(page: "Page", sub_action: str) -> str | None:
+    """The Advanced Search modal must never open during a SEQUENCE.
+
+    If a dialog is visible, cancel it and return a FAILED observation naming
+    the sub-action that was running; return None when no modal is present.
+    """
+    try:
+        if not page.locator('[role="dialog"]').first.is_visible(timeout=150):
+            return None
+    except Exception:
+        return None
+    try:
+        page.get_by_role("button", name="Cancel").first.click(timeout=1500)
+        time.sleep(0.3)
+    except Exception:
+        pass
+    return (
+        f"FAILED: Advanced Search modal opened during {sub_action} — "
+        f"modal cancelled; the sequence must never use Advanced Search"
+    )
+
+
+def _locate_field_edit_input(page: "Page", label: str, *, timeout_ms: int = 400):
+    """Positively locate a field's edit input by role+name matching *label*.
+
+    Returns the Locator (combobox preferred, textbox fallback) or None.
+    Never returns an unverified/assumed-focus target.
+    """
+    for role in ("combobox", "textbox"):
+        for exact in (True, False):
+            try:
+                el = page.get_by_role(role, name=label, exact=exact).first
+                if el.is_visible(timeout=timeout_ms):
+                    return el
+            except Exception:
+                pass
+    return None
+
+
 def _seq_click_pencil_icon(page: "Page", target_field: str) -> str:
     """Scroll to find + click the inline-edit pencil for target_field.
 
     SF renders inline-edit pencils as button[aria-label='Edit <Field>'].
-    They may be off-screen; scroll the Details panel until found (max 4 attempts).
+    They may be off-screen; scroll toward the Details panel (up to 3 targeted
+    scrolls) until found.  Success is NOT the click alone — after clicking,
+    poll up to ~3 s until the field's edit input (combobox/textbox named
+    target_field) actually exists and is visible.  This is the postcondition
+    fill_field depends on: without it, keystrokes can land in the wrong input
+    during the LWC inline-edit re-render.
     """
     if not target_field:
         return "FAILED: click_pencil_icon requires a target field name"
@@ -1214,8 +1264,22 @@ def _seq_click_pencil_icon(page: "Page", target_field: str) -> str:
                 if btn.is_visible(timeout=400):
                     btn.scroll_into_view_if_needed(timeout=1500)
                     btn.click(timeout=2000)
-                    time.sleep(0.5)
-                    return f"clicked 'Edit {target_field}' inline pencil"
+                    # Postcondition: the edit input must actually appear.
+                    deadline = time.monotonic() + 3.0
+                    while time.monotonic() < deadline:
+                        _modal = _seq_advanced_search_guard(page, "click_pencil_icon")
+                        if _modal is not None:
+                            return _modal
+                        if _locate_field_edit_input(page, target_field, timeout_ms=150) is not None:
+                            return (
+                                f"clicked 'Edit {target_field}' pencil — edit input "
+                                f"for '{target_field}' is present"
+                            )
+                        time.sleep(0.25)
+                    return (
+                        f"FAILED: clicked pencil but no edit input for "
+                        f"'{target_field}' appeared"
+                    )
             except Exception:
                 pass
         if _scroll_attempt < 3:
@@ -1228,41 +1292,59 @@ def _seq_click_pencil_icon(page: "Page", target_field: str) -> str:
 
 
 def _seq_fill_field(page: "Page", label: str, value: str) -> str:
-    """Type *value* into the inline lookup input using real keyboard events.
+    """Type *value* into the field's own edit input using real keyboard events.
 
-    Assumes the field is already in inline-edit mode (pencil was clicked).
+    The target input must be POSITIVELY located by role+name matching *label*
+    and explicitly clicked before typing — there is NO focus fallback. Typing
+    into whatever happens to hold focus is how keystrokes ended up in the
+    global search bar during an LWC inline-edit re-render (confirmed trace).
     Uses keyboard.type() — NOT synthetic .fill() — so Salesforce SOQL fires.
-    Does NOT click the dropdown result; that is click_dropdown_result's job.
+    Never presses Enter. Does NOT click the dropdown result; that is
+    click_dropdown_result's job.
     """
     if not label or not value:
         return f"FAILED: fill_field requires label and value (got {label!r}, {value!r})"
-    located = False
-    for exact in (True, False):
+    _modal = _seq_advanced_search_guard(page, "fill_field")
+    if _modal is not None:
+        return _modal
+    # keyboard.type() dispatches Enter for newline chars — strip them so no
+    # Enter keystroke can ever fire from the typing path.
+    value = " ".join(value.split())
+
+    target = _locate_field_edit_input(page, label, timeout_ms=800)
+    if target is None:
+        return (
+            f"FAILED: no input labeled {label!r} found — "
+            f"pencil may not have opened edit mode"
+        )
+    # Hard guard: never type into the page-level global search bar, even if
+    # role+name matching somehow resolved to it.
+    if _is_global_search_bar(target):
+        return (
+            f"FAILED: the input matching {label!r} is the global Salesforce "
+            f"search bar — refusing to type; re-enter inline edit mode first"
+        )
+    # Real focus on the located element (a combobox wraps its actual <input>).
+    try:
+        inner = target.locator("input").first
+        inner.click(timeout=1200)
+    except Exception:
         try:
-            combo = page.get_by_role("combobox", name=label, exact=exact).first
-            if combo.is_visible(timeout=800):
-                inner = combo.locator("input").first
-                inner.click(timeout=1200)
-                located = True
-                break
-        except Exception:
-            pass
-    if not located:
-        for exact in (True, False):
-            try:
-                tb = page.get_by_role("textbox", name=label, exact=exact).first
-                if tb.is_visible(timeout=500):
-                    tb.click(timeout=800)
-                    located = True
-                    break
-            except Exception:
-                pass
+            target.click(timeout=1500)
+        except Exception as e:
+            return (
+                f"FAILED: could not click the input labeled {label!r} "
+                f"({type(e).__name__}) — not typing blind"
+            )
     page.keyboard.press("Control+a")
     page.keyboard.press("Delete")
     time.sleep(0.1)
     page.keyboard.type(value, delay=60)
-    suffix = " (located)" if located else " (by current focus)"
-    return f"typed {value!r} into {label!r}{suffix}"
+    _modal = _seq_advanced_search_guard(page, "fill_field")
+    if _modal is not None:
+        return _modal
+    _LAST_SEQ_FILL["label"] = label
+    return f"typed {value!r} into the located input for {label!r}"
 
 
 # Salesforce lookup dropdowns append a search-escalation row whose label looks
@@ -1279,18 +1361,22 @@ def _is_escalation_row(label: str) -> bool:
     return bool(_ESCALATION_ROW_RE.match(normalized)) or '" in ' in normalized
 
 
-def _find_inline_dropdown_option(page: "Page", text: str):
-    """Return the [role=option] Locator whose label matches *text*, or None.
+def _find_inline_dropdown_option(root, text: str, *, exclude_global_search: bool = False):
+    """Return the [role=option] Locator under *root* matching *text*, or None.
 
-    Matching rule: EXACT first (label == text, case/whitespace-normalized);
-    only then a contains-match fallback. The search-escalation row
-    ('"<text>" in <Object>') is excluded outright — it is never clickable
-    by this primitive because it opens the Advanced Search modal.
+    *root* is either a Page (page-wide search) or a Locator scoping the
+    search to one combobox container. Matching rule: EXACT first (label ==
+    text, case/whitespace-normalized); only then a contains-match fallback.
+    The search-escalation row ('"<text>" in <Object>') is excluded outright —
+    it is never clickable by this primitive because it opens the Advanced
+    Search modal. With exclude_global_search=True (page-wide searches), any
+    option living inside the global header — i.e. the global search bar's
+    suggestion panel — is also excluded.
     """
     target = " ".join(text.split()).casefold()
     contains_match = None
     try:
-        options = page.get_by_role("option").all()
+        options = root.get_by_role("option").all()
     except Exception:
         return None
     for opt in options:
@@ -1301,6 +1387,8 @@ def _find_inline_dropdown_option(page: "Page", text: str):
         except Exception:
             continue
         if _is_escalation_row(label):
+            continue
+        if exclude_global_search and _is_global_search_bar(opt):
             continue
         normalized = " ".join(label.split()).casefold()
         if normalized == target:
@@ -1316,32 +1404,52 @@ def _seq_click_dropdown_result(page: "Page", text: str) -> str:
     This is the primitive that creates the linked-record PILL — the step that
     was missing from previous approaches.  Polls up to 6 s for a [role=option]
     matching *text* (exact match first; contains fallback that never matches
-    the Advanced-Search escalation row).  Does NOT fall back to Advanced
-    Search — if no inline option appears it returns FAILED so the caller can
-    retry.  A click that does not produce a pill is a hard FAILURE: raw text
-    without a pill always triggers Salesforce's "Select an option from the
-    picklist" validation error, so Save can never succeed.
+    the Advanced-Search escalation row), scoped to the combobox that
+    fill_field typed into; page-wide matching is a fallback reserved for
+    detached-overlay listboxes and always excludes the global search bar's
+    suggestion panel.  Does NOT fall back to Advanced Search — if no inline
+    option appears it returns FAILED so the caller can retry.  A click that
+    does not produce a pill is a hard FAILURE: raw text without a pill always
+    triggers Salesforce's "Select an option from the picklist" validation
+    error, so Save can never succeed.
     """
     if not text:
         return "FAILED: click_dropdown_result requires text"
+    # Scope the option poll to the combobox fill_field typed into (re-located
+    # by role+name from the recorded label) so a dropdown spawned by a WRONG
+    # input — e.g. the global search bar — can never satisfy this primitive.
+    scope_label = _LAST_SEQ_FILL.get("label")
     deadline = time.time() + 6.0
     while time.time() < deadline:
         # If the Advanced Search modal opened, cancel it; do not escalate.
-        try:
-            modal = page.locator('[role="dialog"]').first
-            if modal.is_visible(timeout=150):
+        _modal = _seq_advanced_search_guard(page, "click_dropdown_result")
+        if _modal is not None:
+            return _modal
+        combo = None
+        if scope_label:
+            for exact in (True, False):
                 try:
-                    page.get_by_role("button", name="Cancel").first.click(timeout=1500)
-                    time.sleep(0.3)
+                    c = page.get_by_role("combobox", name=scope_label, exact=exact).first
+                    if c.is_visible(timeout=200):
+                        combo = c
+                        break
                 except Exception:
                     pass
-                return (
-                    f"FAILED: Advanced Search modal appeared while waiting for inline "
-                    f"dropdown for {text!r} — modal cancelled; re-run fill_field to retry"
-                )
-        except Exception:
-            pass
-        opt = _find_inline_dropdown_option(page, text)
+        if combo is not None:
+            opt = _find_inline_dropdown_option(combo, text)
+            if opt is None:
+                # Page-wide fallback ONLY when the combobox container renders
+                # no options at all (Salesforce put the listbox in a detached
+                # overlay) — and even then the escalation row and the global
+                # search bar's suggestion panel remain excluded.
+                try:
+                    has_scoped_options = combo.get_by_role("option").count() > 0
+                except Exception:
+                    has_scoped_options = False
+                if not has_scoped_options:
+                    opt = _find_inline_dropdown_option(page, text, exclude_global_search=True)
+        else:
+            opt = _find_inline_dropdown_option(page, text, exclude_global_search=True)
         if opt is not None:
             try:
                 opt.click(timeout=2000)
