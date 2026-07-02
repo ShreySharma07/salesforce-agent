@@ -1402,16 +1402,19 @@ def _seq_click_dropdown_result(page: "Page", text: str) -> str:
     """Wait for the inline lookup dropdown and click the matching option.
 
     This is the primitive that creates the linked-record PILL — the step that
-    was missing from previous approaches.  Polls up to 6 s for a [role=option]
-    matching *text* (exact match first; contains fallback that never matches
-    the Advanced-Search escalation row), scoped to the combobox that
-    fill_field typed into; page-wide matching is a fallback reserved for
-    detached-overlay listboxes and always excludes the global search bar's
-    suggestion panel.  Does NOT fall back to Advanced Search — if no inline
-    option appears it returns FAILED so the caller can retry.  A click that
-    does not produce a pill is a hard FAILURE: raw text without a pill always
-    triggers Salesforce's "Select an option from the picklist" validation
-    error, so Save can never succeed.
+    was missing from previous approaches.  It first waits (hard cap ~7 s) for
+    the option list to STABILIZE — non-empty and unchanged across two
+    consecutive polls — so it can never click the transient recent-items
+    panel while SOQL results are replacing it.  Matching is exact-first with
+    a contains fallback that never matches the Advanced-Search escalation
+    row, scoped to the combobox that fill_field typed into; page-wide
+    matching is reserved for detached-overlay listboxes and always excludes
+    the global search bar's suggestion panel.  The option is re-located fresh
+    immediately before clicking; after the click the pill is polled up to
+    3 s, with ONE re-locate + re-click retry before failing.  Does NOT fall
+    back to Advanced Search.  A click that does not produce a pill is a hard
+    FAILURE: raw text without a pill always triggers Salesforce's "Select an
+    option from the picklist" validation error, so Save can never succeed.
     """
     if not text:
         return "FAILED: click_dropdown_result requires text"
@@ -1419,56 +1422,119 @@ def _seq_click_dropdown_result(page: "Page", text: str) -> str:
     # by role+name from the recorded label) so a dropdown spawned by a WRONG
     # input — e.g. the global search bar — can never satisfy this primitive.
     scope_label = _LAST_SEQ_FILL.get("label")
-    deadline = time.time() + 6.0
-    while time.time() < deadline:
-        # If the Advanced Search modal opened, cancel it; do not escalate.
+
+    def _locate_scope_combo():
+        if not scope_label:
+            return None
+        for exact in (True, False):
+            try:
+                c = page.get_by_role("combobox", name=scope_label, exact=exact).first
+                if c.is_visible(timeout=200):
+                    return c
+            except Exception:
+                pass
+        return None
+
+    def _current_search_root():
+        """Return (root, exclude_global): the scoped combobox when it renders
+        its own options; otherwise the guarded page-wide fallback — ONLY for
+        detached-overlay listboxes — which still excludes the escalation row
+        and the global search bar's suggestion panel."""
+        combo = _locate_scope_combo()
+        if combo is not None:
+            try:
+                if combo.get_by_role("option").count() > 0:
+                    return combo, False
+            except Exception:
+                pass
+        return page, True
+
+    def _visible_option_labels():
+        """Snapshot the currently visible option labels (normalized) under
+        the current search root — the stabilization fingerprint."""
+        root, exclude_global = _current_search_root()
+        labels: list[str] = []
+        try:
+            options = root.get_by_role("option").all()
+        except Exception:
+            return labels
+        for opt in options:
+            try:
+                if not opt.is_visible(timeout=100):
+                    continue
+                lbl = opt.inner_text(timeout=300)
+            except Exception:
+                continue
+            if exclude_global and _is_global_search_bar(opt):
+                continue
+            labels.append(" ".join(lbl.split()))
+        return labels
+
+    # --- STABILIZE: never click the transient recent-items panel. ----------
+    # On focus, SF lookups instantly show a recent-items panel (which can
+    # contain the target name from prior runs), then replace it with async
+    # SOQL results. Clicking during that swap is a stale/detached-node click
+    # that selects nothing. Wait until the option set is NON-EMPTY and
+    # UNCHANGED across two consecutive polls (~300 ms apart), hard cap ~7 s.
+    stabilize_deadline = time.time() + 7.0
+    prev_labels: list[str] | None = None
+    while time.time() < stabilize_deadline:
         _modal = _seq_advanced_search_guard(page, "click_dropdown_result")
         if _modal is not None:
             return _modal
-        combo = None
-        if scope_label:
-            for exact in (True, False):
-                try:
-                    c = page.get_by_role("combobox", name=scope_label, exact=exact).first
-                    if c.is_visible(timeout=200):
-                        combo = c
-                        break
-                except Exception:
-                    pass
-        if combo is not None:
-            opt = _find_inline_dropdown_option(combo, text)
-            if opt is None:
-                # Page-wide fallback ONLY when the combobox container renders
-                # no options at all (Salesforce put the listbox in a detached
-                # overlay) — and even then the escalation row and the global
-                # search bar's suggestion panel remain excluded.
-                try:
-                    has_scoped_options = combo.get_by_role("option").count() > 0
-                except Exception:
-                    has_scoped_options = False
-                if not has_scoped_options:
-                    opt = _find_inline_dropdown_option(page, text, exclude_global_search=True)
-        else:
-            opt = _find_inline_dropdown_option(page, text, exclude_global_search=True)
-        if opt is not None:
-            try:
-                opt.click(timeout=2000)
-                time.sleep(0.6)
-                if _verify_lookup_pill(page):
-                    return f"clicked inline dropdown result {text!r} — pill confirmed"
-                time.sleep(0.5)
-                if _verify_lookup_pill(page):
-                    return f"clicked inline dropdown result {text!r} — pill confirmed (delayed)"
-                return (
-                    f"FAILED: clicked dropdown result for {text!r} but no pill "
-                    f"appeared — field is NOT set; clear and retry"
-                )
-            except Exception:
-                pass
+        labels = _visible_option_labels()
+        if labels and labels == prev_labels:
+            break  # settled: non-empty and identical across two polls
+        prev_labels = labels
         time.sleep(0.3)
+    else:
+        if not prev_labels:
+            return (
+                f"FAILED: no inline dropdown option appeared for {text!r} after 7 s — "
+                f"SOQL may not have fired; re-run fill_field and retry"
+            )
+        # Cap hit while options exist but were still churning — proceed
+        # best-effort; the fresh re-location below minimizes staleness.
+
+    # --- MATCH + CLICK, with ONE retry if no pill forms. --------------------
+    for attempt in (1, 2):
+        _modal = _seq_advanced_search_guard(page, "click_dropdown_result")
+        if _modal is not None:
+            return _modal
+        # Re-locate the option FRESH immediately before clicking — never
+        # click a locator captured in an earlier poll cycle: the listbox may
+        # have re-rendered and the old node be detached.
+        root, exclude_global = _current_search_root()
+        opt = _find_inline_dropdown_option(root, text, exclude_global_search=exclude_global)
+        if opt is None:
+            if attempt == 1:
+                time.sleep(0.4)
+                continue
+            return (
+                f"FAILED: settled dropdown has no option matching {text!r} "
+                f"(escalation row excluded) — re-run fill_field and retry"
+            )
+        try:
+            opt.click(timeout=2000)
+        except Exception:
+            if attempt == 1:
+                continue  # list re-rendered mid-click; re-locate once and retry
+            return (
+                f"FAILED: clicked dropdown result for {text!r} but no pill "
+                f"appeared — field is NOT set; clear and retry"
+            )
+        # Pill verification: poll up to 3 s (LWC pill render is slower than
+        # the old fixed ~1.1 s check), early-exit on success.
+        pill_deadline = time.time() + 3.0
+        while time.time() < pill_deadline:
+            if _verify_lookup_pill(page):
+                suffix = " (after retry)" if attempt == 2 else ""
+                return f"clicked inline dropdown result {text!r} — pill confirmed{suffix}"
+            time.sleep(0.25)
+        # No pill after 3 s — loop once more: re-locate and re-click.
     return (
-        f"FAILED: no inline dropdown option appeared for {text!r} after 6 s — "
-        f"SOQL may not have fired; re-run fill_field and retry"
+        f"FAILED: clicked dropdown result for {text!r} but no pill "
+        f"appeared — field is NOT set; clear and retry"
     )
 
 
