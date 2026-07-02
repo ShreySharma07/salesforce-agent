@@ -121,6 +121,51 @@ def _interpolate_for_url(url: str, variables: dict[str, Any]) -> tuple[str, str 
     return result, ("; ".join(bad) if bad else None)
 
 
+# Extract-value guard: a stored variable must be a bare token/name, never prose.
+# These markers indicate the model returned a narration sentence as the value.
+_EXTRACT_PROSE_MARKERS = ("the field", "shows", "panel")
+_EXTRACT_MAX_LEN = 60
+_QUOTE_CHARS = "\"'“”‘’"
+
+
+def _sanitize_extract_value(raw: Any) -> tuple[Any, str | None]:
+    """Sanitize an extract step's value before it enters ${variables}.
+
+    Strips surrounding quote chars and whitespace. If the result still looks
+    like prose (trailing period, > ~60 chars, or narration phrases like
+    "the field" / "shows" / "panel"), tries to salvage the quoted substring;
+    failing that, returns an error so the step fails instead of letting a
+    sentence flow into ${variables}.
+
+    Returns (sanitized_value, error_or_None).
+    """
+    if not isinstance(raw, str):
+        return raw, None
+    value = raw.strip().strip(_QUOTE_CHARS).strip()
+
+    def _looks_like_prose(v: str) -> bool:
+        low = v.lower()
+        return (
+            v.endswith(".")
+            or len(v) > _EXTRACT_MAX_LEN
+            or any(marker in low for marker in _EXTRACT_PROSE_MARKERS)
+        )
+
+    if not _looks_like_prose(value):
+        return value, None
+
+    log.warning("extract value looks like prose, attempting salvage: %r", raw)
+    # In "The 'From' field shows 'Rachel Torres'." the VALUE is the last quoted
+    # substring, not the first (which is usually a field name) — scan backwards.
+    candidates = re.findall(r"[\"'“‘]([^\"'“”‘’]+)[\"'”’]", value)
+    for salvaged in reversed(candidates):
+        salvaged = salvaged.strip()
+        if salvaged and not _looks_like_prose(salvaged):
+            log.warning("salvaged extract value %r from prose %r", salvaged, raw)
+            return salvaged, None
+    return raw, f"extract returned prose, not a value: {raw!r}"
+
+
 def _resolve_today(text: str) -> str:
     """Replace 'today'/'today's date' tokens with the real current date (M/D/YYYY).
 
@@ -573,22 +618,32 @@ def _run_sequence_step(
         sub_actions.append(resolved)
 
     observations: list[str] = []
-    for sub in sub_actions:
+    seq_trace: list[LoopIteration] = []
+    for idx, sub in enumerate(sub_actions, start=1):
         sub_kind = sub.get("kind", "")
         obs = browser_mode.execute_sequence_sub_action(page, sub_kind, sub)
         observations.append(f"[{sub_kind}] {obs}")
+        seq_trace.append(LoopIteration(
+            iteration=idx,
+            action=sub_kind,
+            action_args={k: v for k, v in sub.items() if k != "kind"},
+            observation=obs,
+            error="sub_action_failed" if obs.startswith("FAILED") else None,
+        ))
         if obs.startswith("FAILED"):
             prior = (" — prior: " + "; ".join(observations[:-1])) if len(observations) > 1 else ""
             return StepResult(
                 step_id=step.id,
                 status="failed",
                 detail=f"Sequence sub-action '{sub_kind}' failed: {obs}{prior}",
+                trace=seq_trace,
             )
 
     return StepResult(
         step_id=step.id,
         status="succeeded",
         detail=" | ".join(observations),
+        trace=seq_trace,
     )
 
 
@@ -686,6 +741,7 @@ def _run_step(page: Page, llm: GeminiClient, step: Step, req: RunRequest, *, var
             page, llm, intent,
             memory_hint=combined_hint,
             success_condition=success_condition,
+            is_extract=(step.kind == StepKind.EXTRACT),
             max_iterations=req.max_iterations_per_step,
             max_seconds=req.max_seconds_per_step,
         )
@@ -713,7 +769,21 @@ def _run_step(page: Page, llm: GeminiClient, step: Step, req: RunRequest, *, var
     extracted: dict[str, Any] = {}
     if step.kind == StepKind.EXTRACT and status == "succeeded":
         var_name = step.details.get("variable_name", "value")
-        extracted = {var_name: outcome.get("evidence", "")}
+        # The done action emits "value" (bare token → variable) separately from
+        # "evidence" (prose proof → trace). Fall back to evidence only for
+        # outcomes that predate the value field (e.g. computer mode).
+        raw_value = outcome.get("value")
+        if raw_value is None or (isinstance(raw_value, str) and not raw_value.strip()):
+            raw_value = outcome.get("evidence", "")
+        value, value_err = _sanitize_extract_value(raw_value)
+        if value_err:
+            return StepResult(
+                step_id=step.id,
+                status="failed",
+                detail=f"{value_err} (variable '{var_name}' NOT stored)",
+                trace=trace,
+            )
+        extracted = {var_name: value}
 
     return StepResult(
         step_id=step.id,
