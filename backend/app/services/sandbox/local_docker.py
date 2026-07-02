@@ -21,18 +21,26 @@ from .base import SandboxHandle, SandboxRunner, SpawnConfig
 
 
 def _find_free_port() -> int:
-    """Get an unused TCP port from the OS in the 49152-58000 range
-    to avoid macOS ephemeral-port collisions in the 60000s."""
+    """Get an unused TCP port in the 50060-55600 range.
+
+    This range avoids:
+      - Windows/Hyper-V admin exclusion   50000-50059
+      - WSL2 ephemeral ports              60000+
+      - Common Hyper-V dynamic exclusions 55619-56352 (seen on this host)
+    socket.bind() only checks Linux availability; Docker exposes through
+    Windows which enforces its own exclusion list, so we must stay below
+    the first Windows-excluded block.
+    """
     import random
     for _ in range(50):
-        port = random.randint(49152, 58000)
+        port = random.randint(50060, 55600)
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             try:
                 s.bind(("", port))
                 return port
             except OSError:
                 continue
-    raise RuntimeError("could not find a free port in 49152-58000 range")
+    raise RuntimeError("could not find a free port in 50060-55600 range")
 
 
 class LocalDockerRunner(SandboxRunner):
