@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from typing import Any
 
@@ -53,7 +54,7 @@ Actions:
   {"thought": "...", "action": "wait", "seconds": <int>}
   {"thought": "...", "action": "dismiss_obstruction", "ref": "<ref_id>"}   # close a popup/modal/cookie banner blocking the goal
   {"thought": "...", "action": "captcha_detected"}                    # a CAPTCHA or bot-check is blocking progress
-  {"thought": "...", "action": "done", "evidence": "<observation proving the goal is met>"}
+  {"thought": "...", "action": "done", "evidence": "<observation proving the goal is met>"}   # extraction goals must ALSO include "value": "<bare extracted value>"
   {"thought": "...", "action": "give_up", "reason": "<why the goal cannot be completed>"}
 
 Rules:
@@ -666,6 +667,7 @@ def execute_step(
     *,
     memory_hint: str = "",
     success_condition: str = "",
+    is_extract: bool = False,
     max_iterations: int = 20,
     max_seconds: float = 400.0,
     screenshot_dir: str | None = None,
@@ -743,6 +745,19 @@ def execute_step(
 
         # ---------- REASON ----------
         prompt_parts = [f"GOAL: {step_intent}"]
+        if is_extract:
+            prompt_parts.append(
+                "EXTRACT OUTPUT FORMAT: this is an EXTRACT step — its result is stored "
+                "in a variable and later typed verbatim into form fields and URLs. "
+                "When you emit `done`, you MUST include TWO fields:\n"
+                '  "value": the bare extracted token/name ONLY — no sentences, no '
+                "quotes, no field names, no punctuation.\n"
+                '  "evidence": a human-readable sentence proving where you read the '
+                "value (this goes to the trace, not the variable).\n"
+                'Example: {"thought": "sender name visible in feed", "action": "done", '
+                '"value": "Rachel Torres", "evidence": "The From field shows Rachel '
+                'Torres as the email sender."}'
+            )
         if success_condition:
             prompt_parts.append(f"SUCCESS CONDITION: {success_condition}")
         if memory_hint:
@@ -930,7 +945,8 @@ def execute_step(
                 screenshot_ref=screenshot_ref, input_tokens=in_tok, output_tokens=out_tok,
                 latency_ms=int((time.monotonic() - iter_start) * 1000),
             ))
-            return _result("succeeded", action.get("evidence", ""), trace)
+            return _result("succeeded", action.get("evidence", ""), trace,
+                           value=action.get("value"))
 
         if kind == "give_up":
             reason = action.get("reason", "agent gave up")
@@ -1246,13 +1262,62 @@ def _seq_fill_field(page: "Page", label: str, value: str) -> str:
     return f"typed {value!r} into {label!r}{suffix}"
 
 
+# Salesforce lookup dropdowns append a search-escalation row whose label looks
+# like:  "rachel" in Contacts  /  "acme corp" in Accounts.  Clicking it opens
+# the Advanced Search modal instead of setting the field.
+_ESCALATION_ROW_RE = re.compile(
+    r'^["\'“‘].*["\'”’]\s+in\s+\S+'
+)
+
+
+def _is_escalation_row(label: str) -> bool:
+    """True if a dropdown option label is Salesforce's search-escalation row."""
+    normalized = " ".join(label.split())
+    return bool(_ESCALATION_ROW_RE.match(normalized)) or '" in ' in normalized
+
+
+def _find_inline_dropdown_option(page: "Page", text: str):
+    """Return the [role=option] Locator whose label matches *text*, or None.
+
+    Matching rule: EXACT first (label == text, case/whitespace-normalized);
+    only then a contains-match fallback. The search-escalation row
+    ('"<text>" in <Object>') is excluded outright — it is never clickable
+    by this primitive because it opens the Advanced Search modal.
+    """
+    target = " ".join(text.split()).casefold()
+    contains_match = None
+    try:
+        options = page.get_by_role("option").all()
+    except Exception:
+        return None
+    for opt in options:
+        try:
+            if not opt.is_visible(timeout=100):
+                continue
+            label = opt.inner_text(timeout=300)
+        except Exception:
+            continue
+        if _is_escalation_row(label):
+            continue
+        normalized = " ".join(label.split()).casefold()
+        if normalized == target:
+            return opt
+        if contains_match is None and target in normalized:
+            contains_match = opt
+    return contains_match
+
+
 def _seq_click_dropdown_result(page: "Page", text: str) -> str:
     """Wait for the inline lookup dropdown and click the matching option.
 
     This is the primitive that creates the linked-record PILL — the step that
     was missing from previous approaches.  Polls up to 6 s for a [role=option]
-    matching *text*.  Does NOT fall back to Advanced Search — if no inline
-    option appears it returns FAILED so the caller can retry.
+    matching *text* (exact match first; contains fallback that never matches
+    the Advanced-Search escalation row).  Does NOT fall back to Advanced
+    Search — if no inline option appears it returns FAILED so the caller can
+    retry.  A click that does not produce a pill is a hard FAILURE: raw text
+    without a pill always triggers Salesforce's "Select an option from the
+    picklist" validation error, so Save can never succeed.
     """
     if not text:
         return "FAILED: click_dropdown_result requires text"
@@ -1273,21 +1338,20 @@ def _seq_click_dropdown_result(page: "Page", text: str) -> str:
                 )
         except Exception:
             pass
-        for exact in (True, False):
+        opt = _find_inline_dropdown_option(page, text)
+        if opt is not None:
             try:
-                opt = page.get_by_role("option", name=text, exact=exact).first
-                if opt.is_visible(timeout=200):
-                    opt.click(timeout=2000)
-                    time.sleep(0.6)
-                    if _verify_lookup_pill(page):
-                        return f"clicked inline dropdown result {text!r} — pill confirmed"
-                    time.sleep(0.5)
-                    if _verify_lookup_pill(page):
-                        return f"clicked inline dropdown result {text!r} — pill confirmed (delayed)"
-                    return (
-                        f"clicked inline dropdown result for {text!r} but no linked-record "
-                        f"pill appeared — field may not be set correctly"
-                    )
+                opt.click(timeout=2000)
+                time.sleep(0.6)
+                if _verify_lookup_pill(page):
+                    return f"clicked inline dropdown result {text!r} — pill confirmed"
+                time.sleep(0.5)
+                if _verify_lookup_pill(page):
+                    return f"clicked inline dropdown result {text!r} — pill confirmed (delayed)"
+                return (
+                    f"FAILED: clicked dropdown result for {text!r} but no pill "
+                    f"appeared — field is NOT set; clear and retry"
+                )
             except Exception:
                 pass
         time.sleep(0.3)
@@ -1986,6 +2050,7 @@ def _result(
     *,
     pause_reason: str | None = None,
     quota_exhausted: bool = False,
+    value: str | None = None,
 ) -> dict[str, Any]:
     return {
         "status": status,
@@ -1993,4 +2058,7 @@ def _result(
         "pause_reason": pause_reason,
         "trace": trace,
         "quota_exhausted": quota_exhausted,
+        # Extract steps: the bare extracted value from the done action.
+        # The executor stores THIS in the variable, never the evidence prose.
+        "value": value,
     }
