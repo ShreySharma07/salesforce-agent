@@ -1507,7 +1507,7 @@ def _seq_click_dropdown_result(page: "Page", text: str) -> str:
     # row, not a loading placeholder), no spinner in the listbox, and the
     # option set unchanged across two consecutive polls (~300 ms apart).
     # Hard cap ~10 s (observed SOQL latency has exceeded 4.7 s).
-    stabilize_deadline = time.time() + 10.0
+    stabilize_deadline = time.time() + 100.0
     prev_labels: list[str] | None = None
     while time.time() < stabilize_deadline:
         _modal = _seq_advanced_search_guard(page, "click_dropdown_result")
@@ -1557,7 +1557,7 @@ def _seq_click_dropdown_result(page: "Page", text: str) -> str:
             )
         # Pill verification: poll up to 3 s (LWC pill render is slower than
         # the old fixed ~1.1 s check), early-exit on success.
-        pill_deadline = time.time() + 3.0
+        pill_deadline = time.time() + 100.0
         while time.time() < pill_deadline:
             if _verify_lookup_pill(page):
                 suffix = " (after retry)" if attempt == 2 else ""
