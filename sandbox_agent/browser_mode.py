@@ -1402,10 +1402,12 @@ def _seq_click_dropdown_result(page: "Page", text: str) -> str:
     """Wait for the inline lookup dropdown and click the matching option.
 
     This is the primitive that creates the linked-record PILL — the step that
-    was missing from previous approaches.  It first waits (hard cap ~7 s) for
-    the option list to STABILIZE — non-empty and unchanged across two
-    consecutive polls — so it can never click the transient recent-items
-    panel while SOQL results are replacing it.  Matching is exact-first with
+    was missing from previous approaches.  It first waits (hard cap ~10 s)
+    for the option list to STABILIZE — at least one REAL candidate (not the
+    escalation row, not a loading placeholder), no listbox spinner, and the
+    option set unchanged across two consecutive polls — so it can never
+    click the transient recent-items panel while SOQL results are replacing
+    it, and never treats an escalation-row-only loading state as settled.  Matching is exact-first with
     a contains fallback that never matches the Advanced-Search escalation
     row, scoped to the combobox that fill_field typed into; page-wide
     matching is reserved for detached-overlay listboxes and always excludes
@@ -1470,31 +1472,61 @@ def _seq_click_dropdown_result(page: "Page", text: str) -> str:
             labels.append(" ".join(lbl.split()))
         return labels
 
+    def _is_loading_label(label: str) -> bool:
+        """True for loading/spinner placeholder rows rendered inside the listbox."""
+        normalized = " ".join(label.split()).casefold().strip(".…… ")
+        return (normalized == "" or normalized.startswith("loading")
+                or normalized.startswith("searching"))
+
+    def _has_real_candidate(labels: list[str]) -> bool:
+        """A REAL candidate is an option that is neither the escalation row
+        nor a loading placeholder — the only thing worth clicking."""
+        return any(
+            not _is_escalation_row(l) and not _is_loading_label(l) for l in labels
+        )
+
+    def _listbox_loading() -> bool:
+        """True while a spinner/loading indicator is visible inside the listbox."""
+        root, _ = _current_search_root()
+        try:
+            spinner = root.locator(
+                '[role="listbox"] lightning-spinner, [role="listbox"] .slds-spinner'
+            ).first
+            return spinner.is_visible(timeout=100)
+        except Exception:
+            return False
+
     # --- STABILIZE: never click the transient recent-items panel. ----------
     # On focus, SF lookups instantly show a recent-items panel (which can
     # contain the target name from prior runs), then replace it with async
     # SOQL results. Clicking during that swap is a stale/detached-node click
-    # that selects nothing. Wait until the option set is NON-EMPTY and
-    # UNCHANGED across two consecutive polls (~300 ms apart), hard cap ~7 s.
-    stabilize_deadline = time.time() + 7.0
+    # that selects nothing. And while the SOQL query is still in flight,
+    # Salesforce can render the escalation row ('"<text>" in <Object>')
+    # ALONE and stable — that is a LOADING state, not a settled result list.
+    # Settled means: at least one REAL candidate option (not the escalation
+    # row, not a loading placeholder), no spinner in the listbox, and the
+    # option set unchanged across two consecutive polls (~300 ms apart).
+    # Hard cap ~10 s (observed SOQL latency has exceeded 4.7 s).
+    stabilize_deadline = time.time() + 10.0
     prev_labels: list[str] | None = None
     while time.time() < stabilize_deadline:
         _modal = _seq_advanced_search_guard(page, "click_dropdown_result")
         if _modal is not None:
             return _modal
         labels = _visible_option_labels()
-        if labels and labels == prev_labels:
-            break  # settled: non-empty and identical across two polls
+        if (_has_real_candidate(labels) and labels == prev_labels
+                and not _listbox_loading()):
+            break  # settled: real candidate present, identical across two polls
         prev_labels = labels
         time.sleep(0.3)
     else:
-        if not prev_labels:
+        if not _has_real_candidate(prev_labels or []):
             return (
-                f"FAILED: no inline dropdown option appeared for {text!r} after 7 s — "
-                f"SOQL may not have fired; re-run fill_field and retry"
+                f"FAILED: no real result option appeared within 10s (only the "
+                f"escalation row) — SOQL returned nothing or is too slow"
             )
-        # Cap hit while options exist but were still churning — proceed
-        # best-effort; the fresh re-location below minimizes staleness.
+        # Cap hit while real candidates exist but the list was still churning —
+        # proceed best-effort; the fresh re-location below minimizes staleness.
 
     # --- MATCH + CLICK, with ONE retry if no pill forms. --------------------
     for attempt in (1, 2):
