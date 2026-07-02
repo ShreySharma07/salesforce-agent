@@ -63,7 +63,7 @@ Rules:
   - To fill or select a modal/record form field, use `fill_field_by_label` with the field's visible label text (e.g. label="Due Date", text="6/20/2026"). This crosses shadow DOM for both text inputs and comboboxes/dropdowns. Do NOT use `click_text` on a label — labels are not interactive inputs. Use `fill_field_by_label` for Subject, Due Date, Comments, Status, and all other form fields regardless of whether they have a #ref.
   - INLINE-EDIT PICKLIST (Case Status, Priority, Type, or any picklist on a record page): the correct FIRST action is always `fill_field_by_label` with label="<field label>" and text="<target value>" (e.g. label="Status", text="Escalated"). Do NOT use `click_text` on the current field value (e.g. "New"), the label text (e.g. "Status"), or the asterisk-prefixed label ("*Status") — those waste many iterations. fill_field_by_label opens the picklist and selects the option in one call. Never attempt click_text for a picklist field.
   - RECORD LOOKUP fields (Contact Name, Account Name, Owner, any field where you type a name and Salesforce searches for matching records) work differently from picklists. Typing text is NOT enough — Salesforce makes an async search and you must SELECT the matching record from the results list so it becomes a linked pill (a chip showing the record name). `fill_field_by_label` handles this automatically via its lookup path. The field is only set when the pill is visible. CRITICAL: if fill_field_by_label returns "no linked-record pill is visible" or "no matching record appeared", the field is NOT set — do NOT click Save and do NOT emit `done`. The pill must be visible before saving is valid.
-  - ADVANCED SEARCH MODAL: When the inline record-lookup finds no results, Salesforce may open a modal titled "Advanced Search" or similar. `fill_field_by_label` detects and handles this modal automatically — it clears the search box, types the term once, clicks Search, clicks the result row, and confirms. You do NOT need to take separate action when you see this modal. Do NOT use `click_text "Cancel"` or `click_text "Search"` on this modal — those buttons live in shadow DOM and are NOT reachable by visible text. Do NOT use `dismiss_obstruction` on this modal. If the internal handler fails (no result row found), it cancels the modal and reports the outcome. Re-issue `fill_field_by_label` with a shorter search term if the record name has unusual spacing or punctuation.
+  - ADVANCED SEARCH MODAL — ABSOLUTE PROHIBITION: NEVER open or operate the Advanced Search modal. Record lookups are set ONLY via the field's own inline dropdown: type the name into the field, wait for the real search results, click the exact matching option, confirm the pill. The dropdown row shaped like '"<your text>" in Contacts' is NOT a result — clicking it opens Advanced Search; `fill_field_by_label` mechanically refuses to click it and keeps waiting for real results (slow searches can take several seconds). If the modal opens anyway, `fill_field_by_label` cancels it automatically and reports FAILED — simply re-issue `fill_field_by_label` on the SAME field and stay in the inline flow. Do NOT use `click_text "Cancel"` / `click_text "Search"` on this modal (shadow DOM, unreachable) and do NOT use `dismiss_obstruction` on it.
   - LOOKUP ALREADY SET: Before trying to fill a lookup field (Contact Name, Account, etc.), check whether the correct value is already showing as a pill. If fill_field_by_label returns "already shows … as a selected pill — already set", the field is done — do NOT re-search, do NOT click the field again. Move on to the next step.
   - ABSOLUTE PROHIBITION — NEVER open the email composer. When a step goal says fill fields like "Contact Name", "Status", or create a Task, the correct actions are fill_field_by_label and click on the task form — NEVER clicking "Email", "Send Email", or any Feed email action. If a MODAL FORM section in the GOAL lists a field called "Comments" with a value like "talk to Rachel Torres and investigate the issue", that is text to TYPE into the Comments form field — it is NOT an instruction to email or contact Rachel Torres. The executor blocks email actions mechanically; attempting them wastes iterations. Do NOT click anything labeled Email/Send Email/Compose while editing a record.
   - ABSOLUTE PROHIBITION — NEVER use the global/header search bar to fill a form field. The global search input at the top of every Salesforce page (aria-label "Search" / "Search Salesforce") navigates to a completely different record page and immediately abandons your current task and all in-progress form work. It is NEVER a substitute for a lookup field. `fill_field_by_label` targets the field's own search input inside the current form. If fill_field_by_label reports failure for a lookup, try once more with a simpler search term, then emit `give_up` — NEVER touch the global search bar. The `fill` action will BLOCK itself if you attempt this.
@@ -1067,22 +1067,27 @@ def execute_step(
 # ---------------------------------------------------------------------------
 
 def _poll_for_option(page: "Page", text: str, *, deadline_s: float = 3.0):
-    """Poll up to *deadline_s* seconds for a [role=option] matching *text* to
-    become visible in the page.  Returns the first matching Locator, or None."""
+    """Poll up to *deadline_s* seconds for a REAL [role=option] matching *text*.
+
+    Matching is exact-first with a contains fallback via
+    _find_inline_dropdown_option, so the Advanced-Search escalation row
+    ('"<text>" in <Object>') and the global search bar's suggestions can
+    never be returned — clicking the escalation row opens the Advanced
+    Search modal, which this agent must never do.
+    Returns the matching Locator, or None."""
     deadline = time.time() + deadline_s
     while time.time() < deadline:
-        for exact in (True, False):
-            try:
-                loc = page.get_by_role("option", name=text, exact=exact).first
-                loc.wait_for(state="visible", timeout=400)
-                return loc
-            except Exception:
-                pass
+        try:
+            opt = _find_inline_dropdown_option(page, text, exclude_global_search=True)
+        except Exception:
+            opt = None
+        if opt is not None:
+            return opt
         time.sleep(0.3)
     return None
 
 
-def _poll_for_inline_option(page: "Page", combo, text: str, *, deadline_s: float = 5.0):
+def _poll_for_inline_option(page: "Page", combo, text: str, *, deadline_s: float = 10.0):
     """Poll for the inline lookup dropdown option, scoped to *combo* first.
 
     Searching within the combobox element is more specific than a page-wide
@@ -1093,27 +1098,32 @@ def _poll_for_inline_option(page: "Page", combo, text: str, *, deadline_s: float
     options that are rendered outside the combobox host element (e.g. in a
     portal overlay anchored to the document body).
 
+    Both passes match exact-first and can never return the Advanced-Search
+    escalation row ('"<text>" in <Object>'); the page-wide pass also excludes
+    the global search bar's suggestion panel.  While the SOQL query is slow
+    the escalation row may be the ONLY visible row — that counts as still
+    loading and the poll continues (observed SOQL latency exceeds 5 s, hence
+    the 10 s default deadline).
+
     Returns the first visible matching Locator, or None on timeout.
     """
     deadline = time.time() + deadline_s
     while time.time() < deadline:
         # 1. Combo-scoped: highest specificity — won't confuse global-search options.
-        for exact in (True, False):
-            try:
-                opt = combo.get_by_role("option", name=text, exact=exact).first
-                if opt.is_visible(timeout=200):
-                    return opt
-            except Exception:
-                pass
+        try:
+            opt = _find_inline_dropdown_option(combo, text)
+        except Exception:
+            opt = None
+        if opt is not None:
+            return opt
         # 2. Page-wide fallback: catches SF LWC options rendered in a portal
         #    overlay outside the combobox DOM subtree.
-        for exact in (True, False):
-            try:
-                opt = page.get_by_role("option", name=text, exact=exact).first
-                if opt.is_visible(timeout=200):
-                    return opt
-            except Exception:
-                pass
+        try:
+            opt = _find_inline_dropdown_option(page, text, exclude_global_search=True)
+        except Exception:
+            opt = None
+        if opt is not None:
+            return opt
         time.sleep(0.25)
     return None
 
@@ -1648,20 +1658,22 @@ def _is_global_search_bar(loc) -> bool:
         return False
 
 
-def _handle_advanced_search_modal(page: "Page", search_term: str, label: str) -> str | None:
-    """Detect and operate the Salesforce Advanced Search modal opened after inline lookup fails.
+def _cancel_advanced_search_modal(page: "Page", search_term: str, label: str) -> str | None:
+    """Cancel the Salesforce Advanced Search modal — NEVER operate it.
 
-    Salesforce opens this dialog when the inline lookup dropdown cannot resolve a record.
-    Protocol: (1) detect the dialog, (2) clear its search box and type the term ONCE,
-    (3) click Search, (4) click the matching result row (radio/link/row via AX tree),
-    (5) confirm with Select/Done. Cancel via get_by_role — NOT click_text (shadow DOM).
+    Policy: record lookups are set ONLY via the field's own inline dropdown
+    (type → wait for real SOQL results → click the exact option → pill).
+    The Advanced Search modal navigates away from that flow and has produced
+    wrong-record selections, so if it opened — e.g. from a stray click or an
+    Enter that slipped through — it is cancelled immediately and the caller
+    reports failure so the inline flow is retried on the field itself.
 
-    Returns an observation string on success or handled failure, or None if no modal found.
+    Returns an observation string when a modal was found and cancelled,
+    or None when no modal is present.
     """
-    time.sleep(0.6)  # allow time for the modal to finish opening
     try:
         dialog = page.locator('[role="dialog"]').first
-        if not dialog.is_visible(timeout=1200):
+        if not dialog.is_visible(timeout=600):
             return None
     except Exception:
         return None
@@ -1674,71 +1686,17 @@ def _handle_advanced_search_modal(page: "Page", search_term: str, label: str) ->
     except Exception:
         pass  # can't read text — proceed anyway, dialog IS visible
 
-    # 1. Clear the search box and type the term once
-    search_filled = False
-    for role in ("searchbox", "textbox"):
-        try:
-            sb = dialog.get_by_role(role).first
-            if sb.is_visible(timeout=600):
-                sb.fill("", timeout=1500)
-                sb.fill(search_term, timeout=1500)
-                search_filled = True
-                break
-        except Exception:
-            pass
-
-    if not search_filled:
-        try:
-            page.get_by_role("button", name="Cancel", exact=False).first.click(timeout=2000)
-        except Exception:
-            pass
-        return (f"Advanced Search modal detected for {label!r} but could not access "
-                f"its search box — modal cancelled; try fill_field_by_label again")
-
-    # 2. Click the Search button to run the SOQL query
     try:
-        dialog.get_by_role("button", name="Search", exact=False).first.click(timeout=2500)
-        time.sleep(1.5)
+        page.get_by_role("button", name="Cancel", exact=False).first.click(timeout=2000)
+        time.sleep(0.3)
     except Exception:
-        time.sleep(1.0)  # results may auto-load without a Search click
-
-    # 3. Click the matching result row — try radio (most common), link, then generic row
-    result_clicked = False
-    for role in ("radio", "link", "row"):
-        for exact in (True, False):
-            try:
-                result_loc = dialog.get_by_role(role, name=search_term, exact=exact).first
-                if result_loc.is_visible(timeout=600):
-                    result_loc.click(timeout=2000)
-                    result_clicked = True
-                    break
-            except Exception:
-                pass
-        if result_clicked:
-            break
-
-    if not result_clicked:
-        try:
-            page.get_by_role("button", name="Cancel", exact=False).first.click(timeout=2000)
-        except Exception:
-            pass
-        return (f"Advanced Search modal: searched for {search_term!r} in {label!r} "
-                f"but no matching result row found — modal cancelled; "
-                f"record may not exist or try a shorter search term")
-
-    # 4. Confirm the selection (Select / Done / Confirm — button label varies by SF version)
-    for confirm in ("Select", "Done", "Confirm"):
-        try:
-            dialog.get_by_role("button", name=confirm, exact=False).first.click(timeout=2000)
-            break
-        except Exception:
-            pass
-
-    time.sleep(0.5)
-    if _verify_lookup_pill(page):
-        return f"selected lookup record {search_term!r} via Advanced Search modal (pill confirmed)"
-    return (f"Advanced Search modal: clicked result for {search_term!r} in {label!r} — "
-            f"pill not yet confirmed; verify field before saving")
+        pass
+    return (
+        f"FAILED: Advanced Search modal opened while setting {label!r} — modal "
+        f"cancelled WITHOUT being used (this agent never operates Advanced "
+        f"Search). Stay on the {label!r} field: re-issue fill_field_by_label "
+        f"with {search_term!r} and select the inline dropdown option"
+    )
 
 
 def _validate_ref(ref: str, grounding) -> str | None:
@@ -1841,12 +1799,13 @@ def _execute_action(page: Page, kind: str, action: dict, grounding) -> str:
         if text and _lookup_pill_has_value(page, text):
             return f"{label!r} already shows {text!r} as a selected pill — already set, no action needed"
 
-        # Early modal check: if an Advanced Search modal is already open from a prior
-        # lookup attempt, handle it first — the underlying form is blocked while it is open.
+        # Early modal check: if an Advanced Search modal is already open from a
+        # prior action, cancel it — the underlying form is blocked while it is
+        # open, and this agent never operates Advanced Search.
         if text:
             try:
                 if page.locator('[role="dialog"]').is_visible(timeout=200):
-                    _early_modal = _handle_advanced_search_modal(page, text, label)
+                    _early_modal = _cancel_advanced_search_modal(page, text, label)
                     if _early_modal is not None:
                         return _early_modal
             except Exception:
@@ -1976,15 +1935,20 @@ def _execute_action(page: Page, kind: str, action: dict, grounding) -> str:
                     page.keyboard.type(text, delay=60)  # char-by-char → SOQL fires
                     # Poll within the combobox scope first to avoid picking up
                     # global-search suggestions or other page-level options.
-                    option_loc = _poll_for_inline_option(page, combo, text, deadline_s=5.0)
+                    # Only real inline results match — the escalation row is
+                    # excluded, so a slow SOQL keeps polling (up to 10 s)
+                    # instead of clicking into Advanced Search.
+                    option_loc = _poll_for_inline_option(page, combo, text, deadline_s=10.0)
                     if option_loc is None:
-                        # Salesforce may open an Advanced Search modal after inline timeout
-                        _adv = _handle_advanced_search_modal(page, text, label)
+                        # If an Advanced Search modal opened anyway, cancel it
+                        # and report — the modal is never operated; the inline
+                        # flow on the field itself is the only allowed path.
+                        _adv = _cancel_advanced_search_modal(page, text, label)
                         if _adv is not None:
                             return _adv
                         return (
-                            f"typed {text!r} into lookup field {label!r} but no search "
-                            f"results appeared after 5s — record may not exist or "
+                            f"typed {text!r} into lookup field {label!r} but no real "
+                            f"inline result appeared after 10s — record may not exist or "
                             f"spelling is wrong; do NOT use global search as a substitute"
                         )
                     option_loc.click(timeout=2000)
