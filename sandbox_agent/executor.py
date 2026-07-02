@@ -11,11 +11,15 @@ Phase 2b:
 """
 from __future__ import annotations
 
+import datetime
 import json
+import logging
 import os
 import re
 import time
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 from playwright.sync_api import Page, sync_playwright
 
@@ -117,11 +121,24 @@ def _interpolate_for_url(url: str, variables: dict[str, Any]) -> tuple[str, str 
     return result, ("; ".join(bad) if bad else None)
 
 
+def _resolve_today(text: str) -> str:
+    """Replace 'today'/'today's date' tokens with the real current date (M/D/YYYY).
+
+    Plans are authored with "today's date" as a placeholder so they remain
+    correct day-to-day.  The agent must NOT invent a date — we substitute the
+    actual system date here so the intent string carries a concrete value.
+    """
+    today = datetime.date.today()
+    date_str = f"{today.month}/{today.day}/{today.year}"  # e.g. "6/27/2026"
+    return re.sub(r"today[’']?s?\s+date|today", date_str, text, flags=re.IGNORECASE)
+
+
 def _step_intent(step: Step, variables: dict[str, Any] | None = None) -> str:
     base = step.description
     intent = step.details.get("intent")
     target = step.details.get("target_description")
     value = step.details.get("value")
+    fields = step.details.get("fields")
     parts = [base]
     if intent and intent.lower() not in base.lower():
         parts.append(f"Intent: {intent}")
@@ -129,8 +146,27 @@ def _step_intent(step: Step, variables: dict[str, Any] | None = None) -> str:
         parts.append(f"Target: {target}")
     if value:
         parts.append(f"Value: {value}")
+    if fields and isinstance(fields, dict):
+        # Format as a structured MODAL FORM block so the agent treats each
+        # entry as an INPUT to type/select via fill_field_by_label — not as
+        # prose instructions to execute.  The Comments field value is text to
+        # TYPE into the form box; it is NOT a directive to email or contact anyone.
+        field_lines = []
+        for k, v in fields.items():
+            extra = ""
+            if k.lower() in ("comments", "description", "body", "comment", "note", "notes"):
+                extra = "  [TYPE this string into the field — do NOT email or contact anyone]"
+            field_lines.append(f'  • {k}: "{v}"{extra}')
+        parts.append(
+            "MODAL FORM — fill ALL of these fields using fill_field_by_label before clicking Save"
+            " (each bullet is a FORM FIELD LABEL mapped to an INPUT VALUE to type/select;"
+            " values are data to enter, not actions to perform):\n"
+            + "\n".join(field_lines)
+        )
     raw = ". ".join(parts)
-    return _interpolate(raw, variables) if variables else raw
+    if variables:
+        raw = _interpolate(raw, variables)
+    return _resolve_today(raw)
 
 
 # ---------------------------------------------------------------------------
@@ -230,6 +266,11 @@ def _run_loop(
 
     results: list[StepResult] = []
     loop_range = range(max_iters) if is_drain else range(min(len(items), max_iters))
+    # Drain backstop: track the URL of the last successfully-opened record.
+    # If the same URL appears twice in a row, the processing steps failed to
+    # change the record's state (it stayed in the filter).  Pause rather than
+    # spin forever.
+    last_drain_url: str | None = None
 
     for loop_idx in loop_range:
         if is_drain:
@@ -263,14 +304,47 @@ def _run_loop(
 
             result = _run_step(page, llm, body_step, req, variables=variables)
 
-            # Drain sentinel: first body step failing means the list is now empty.
-            # Return a succeeded loop result so the run continues past the loop.
-            if is_drain and body_idx == 0 and result.status == "failed":
-                return results + [StepResult(
-                    step_id=step.id,
-                    status="succeeded",
-                    detail=f"drain loop complete after {loop_idx} iteration(s): no more rows in list",
-                )]
+            # Drain sentinel handling (body_idx == 0):
+            if is_drain and body_idx == 0:
+                # Empty-list signals: the sentinel step may SUCCEED (emit done) when it
+                # observes the empty state before attempting any click.  Treat both
+                # "failed" (click found no row) and a succeeded-with-empty-list-detail
+                # as "drain complete" so we don't fall through into the body steps.
+                _EMPTY_LIST_SIGNALS = (
+                    "0 items", "nothing to see here", "no items to display",
+                    "no records", "no rows", "list is empty", "queue is empty",
+                    "empty list", "no cases", "no data",
+                )
+                _detail_lower = (result.detail or "").lower()
+                _list_empty = result.status == "failed" or any(
+                    s in _detail_lower for s in _EMPTY_LIST_SIGNALS
+                )
+                if _list_empty:
+                    # List is empty — drain complete.
+                    return results + [StepResult(
+                        step_id=step.id,
+                        status="succeeded",
+                        detail=f"drain loop complete after {loop_idx} iteration(s): no more rows in list",
+                    )]
+                # Backstop: same record URL served twice in a row means the
+                # processing steps failed to change state and the record stayed
+                # in the filter.  Per-step success_conditions normally prevent
+                # this, but pause defensively if it happens anyway.
+                try:
+                    current_url = page.url
+                except Exception:
+                    current_url = ""
+                if current_url and current_url == last_drain_url:
+                    return results + [StepResult(
+                        step_id=step.id,
+                        status="paused",
+                        detail=(
+                            f"drain loop stuck: record at {current_url!r} was served "
+                            f"again on iteration {loop_idx} — a processing step failed "
+                            f"to persist its target state. Pausing for human review."
+                        ),
+                    )]
+                last_drain_url = current_url
 
             results.append(result)
             variables.update(result.extracted)
@@ -296,6 +370,30 @@ def _run_loop(
 
 def run_plan(req: RunRequest) -> RunResponse:
     started = time.monotonic()
+
+    # ── RUN-START GUARD ────────────────────────────────────────────────────
+    # Log plan identity and loop bodies so stale-plan issues are immediately
+    # obvious in container logs (old plan = no success_condition fields).
+    _loop_bodies = {
+        s.id: s.details.get("body", [])
+        for s in req.plan.steps
+        if s.kind == StepKind.LOOP
+    }
+    _steps_with_sc = [s.id for s in req.plan.steps if s.success_condition]
+    log.info(
+        "RUN START plan_id=%s version=%d steps=%d loops=%s",
+        req.plan.id, req.plan.version, len(req.plan.steps), _loop_bodies,
+    )
+    if _steps_with_sc:
+        log.info("Steps with success_condition: %s", _steps_with_sc)
+    else:
+        log.warning(
+            "plan %s v%d has NO steps with success_condition — "
+            "stale plan (old extract+decision idiom) may be in use",
+            req.plan.id, req.plan.version,
+        )
+    # ───────────────────────────────────────────────────────────────────────
+
     llm = GeminiClient()
     step_results: list[StepResult] = []
 
@@ -340,6 +438,10 @@ def run_plan(req: RunRequest) -> RunResponse:
                     child_ids.update(s.details.get("body", []))
             variables: dict[str, Any] = {}
             step_count = 0
+            # Carry the last step's final observation forward so the next step's
+            # ReAct loop knows what page state was left — avoids re-exploring
+            # after e.g. clicking an edit icon or opening a modal.
+            prev_step_context: str = ""
 
             for step in req.plan.steps:
                 if step.id in child_ids:
@@ -354,13 +456,32 @@ def run_plan(req: RunRequest) -> RunResponse:
                 elif step.kind == StepKind.LOOP:
                     new_results = _run_loop(step, step_by_id, page, llm, req, variables)
                 else:
-                    result = _run_step(page, llm, step, req, variables=variables)
+                    result = _run_step(page, llm, step, req, variables=variables,
+                                       prev_context=prev_step_context)
                     variables.update(result.extracted)
                     new_results = [result]
 
                 for result in new_results:
                     step_results.append(result)
                     step_count += 1
+
+                    # Update inter-step context: the last observation from this
+                    # step's trace gives the next step a warm start — it knows
+                    # what state the page is in without re-exploring.
+                    if result.trace:
+                        last_it = result.trace[-1]
+                        obs = last_it.observation or result.detail or ""
+                        src_step = step_by_id.get(result.step_id, step)
+                        if obs and result.status == "succeeded":
+                            prev_step_context = (
+                                f"PREVIOUS STEP ('{src_step.description}') just completed. "
+                                f"Final observation: {obs[:200]}. "
+                                f"The page is already in this state — do NOT re-do what is already done."
+                            )
+                        else:
+                            prev_step_context = ""
+                    else:
+                        prev_step_context = ""
 
                     if getattr(result, "quota_exhausted", False):
                         return _finish("aborted", step_results, page,
@@ -420,7 +541,58 @@ def _browser_context_for_computer_mode(
     return "\n".join(parts)
 
 
-def _run_step(page: Page, llm: GeminiClient, step: Step, req: RunRequest, *, variables: dict[str, Any] | None = None) -> StepResult:
+def _run_sequence_step(
+    page: "Page",
+    step: Step,
+    variables: dict[str, Any],
+) -> StepResult:
+    """Execute a SEQUENCE step deterministically — no LLM, no ReAct loop.
+
+    Checks the success_condition via a lightweight Playwright check (idempotency).
+    Then executes each sub-action in details.steps in order.  A FAILED observation
+    from any sub-action aborts the sequence immediately.
+    """
+    raw_condition = step.success_condition or step.details.get("success_condition", "")
+    if raw_condition:
+        resolved_condition = _resolve_today(_interpolate(raw_condition, variables))
+        if browser_mode.check_sequence_condition(page, resolved_condition):
+            return StepResult(
+                step_id=step.id,
+                status="succeeded",
+                detail=f"[idempotent] already satisfied: {resolved_condition[:120]}",
+            )
+
+    sub_actions_raw: list[dict] = step.details.get("steps", [])
+    sub_actions = []
+    for sub in sub_actions_raw:
+        resolved: dict[str, Any] = {}
+        for k, v in sub.items():
+            if isinstance(v, str):
+                v = _resolve_today(_interpolate(v, variables))
+            resolved[k] = v
+        sub_actions.append(resolved)
+
+    observations: list[str] = []
+    for sub in sub_actions:
+        sub_kind = sub.get("kind", "")
+        obs = browser_mode.execute_sequence_sub_action(page, sub_kind, sub)
+        observations.append(f"[{sub_kind}] {obs}")
+        if obs.startswith("FAILED"):
+            prior = (" — prior: " + "; ".join(observations[:-1])) if len(observations) > 1 else ""
+            return StepResult(
+                step_id=step.id,
+                status="failed",
+                detail=f"Sequence sub-action '{sub_kind}' failed: {obs}{prior}",
+            )
+
+    return StepResult(
+        step_id=step.id,
+        status="succeeded",
+        detail=" | ".join(observations),
+    )
+
+
+def _run_step(page: Page, llm: GeminiClient, step: Step, req: RunRequest, *, variables: dict[str, Any] | None = None, prev_context: str = "") -> StepResult:
     """Execute a single step."""
     # ---- Non-UI step kinds ----
     if step.kind == StepKind.WAIT:
@@ -489,15 +661,31 @@ def _run_step(page: Page, llm: GeminiClient, step: Step, req: RunRequest, *, var
             return StepResult(step_id=step.id, status="failed",
                               detail=f"navigate failed: {e}")
 
+    if step.kind == StepKind.SEQUENCE:
+        return _run_sequence_step(page, step, variables or {})
+
     # ---- UI / extract — ReAct loop ----
     intent = _step_intent(step, variables)
     mode = _route_step(step)
     trace: list[LoopIteration] = []
 
+    # Extract and interpolate the step's success_condition.
+    # Falls back to details["success_condition"] for hand-crafted plans that
+    # put it there instead of as a top-level field.
+    raw_condition = (step.success_condition or
+                     step.details.get("success_condition", ""))
+    success_condition = ""
+    if raw_condition:
+        success_condition = _resolve_today(_interpolate(raw_condition, variables or {}))
+
     if mode == ExecutionMode.BROWSER:
+        # Merge static memory_hint with the live prev_context from the last step.
+        static_hint = req.memory_hints.get(step.id, "")
+        combined_hint = "\n\n".join(filter(None, [prev_context, static_hint]))
         outcome = browser_mode.execute_step(
             page, llm, intent,
-            memory_hint=req.memory_hints.get(step.id, ""),
+            memory_hint=combined_hint,
+            success_condition=success_condition,
             max_iterations=req.max_iterations_per_step,
             max_seconds=req.max_seconds_per_step,
         )

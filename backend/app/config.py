@@ -47,7 +47,7 @@ class Settings(BaseSettings):
 
     # ----- LLM provider -----
     llm_provider: Literal["mock", "gemini", "anthropic", "openai"] = "gemini"
-    llm_model: str = "gemini-3-flash-preview"
+    llm_model: str = "gemini-3.1-pro-preview"
     gemini_api_key: str | None = None
     anthropic_api_key: str | None = None
     openai_api_key: str | None = None

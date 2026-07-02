@@ -31,20 +31,20 @@ async def run_e2e(plan_path: Path, backend: str, name: str, watch: bool, auto_op
     plan_id = plan_data["id"]
 
     async with httpx.AsyncClient(base_url=backend, timeout=15) as client:
-        # Step 1: ensure plan exists in the backend DB; upload it if not.
-        r = await client.get(f"/plans/{plan_id}")
-        if r.status_code == 404:
-            print(f"  uploading plan {plan_id} to backend...")
-            upload = await client.post("/plans", json=plan_data)
-            upload.raise_for_status()
-            print(f"  ✓ uploaded plan {plan_id}")
-        else:
-            r.raise_for_status()
+        # Step 1: always upsert the plan from the file so the DB is never stale.
+        # Checking GET first and skipping the upload when the plan "exists" is the
+        # classic stale-plan trap — the DB keeps the old version even after the
+        # JSON file is updated.  POST /plans is an upsert: it overwrites in place.
+        r = await client.post("/plans", json=plan_data)
+        r.raise_for_status()
+        version = plan_data.get("version", "?")
+        print(f"  ✓ upserted plan {plan_id} (version {version}, "
+              f"{len(plan_data.get('steps', []))} steps)")
 
-        # Step 2: approve it
+        # Step 2: approve it (idempotent — already approved plans stay approved)
         r = await client.post(f"/plans/{plan_id}/approve")
         r.raise_for_status()
-        print(f"  ✓ approved plan {plan_id}")
+        print(f"  ✓ approved plan {plan_id} v{version}")
 
         # Step 3: wrap as automation (or reuse if exists by name)
         autos = (await client.get("/automations")).json()

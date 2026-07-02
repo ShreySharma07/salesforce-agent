@@ -1,0 +1,192 @@
+{
+  "id": "plan_ac3759ca42",
+  "automation_id": null,
+  "version": 5,
+  "status": "approved",
+  "goal": "Automatically process new Acme cases by updating the contact name, escalating the status, and creating a follow-up task assigned to Shrey Sharma.",
+  "summary": "This plan automates the daily triage of new cases for the Acme account. It navigates to the Acme Cases list view and drains it: for each case it extracts the contact name, sets the Contact Name field, escalates Status to Escalated, and creates a Call task. Every state-changing step carries a success_condition so it self-skips if the target state is already present, making each iteration idempotent for any partial-completion state.",
+  "steps": [
+    {
+      "id": "step_001",
+      "kind": "ui_action",
+      "description": "Open Salesforce Lightning",
+      "details": {
+        "intent": "open_app",
+        "target_description": "Salesforce Lightning"
+      },
+      "on_failure": "pause"
+    },
+    {
+      "id": "step_002",
+      "kind": "navigate",
+      "description": "Navigate to the Acme Cases list view",
+      "details": {
+        "url": "https://sumitpaliw-250428-644-demo.lightning.force.com/lightning/o/Case/list?filterName=Acme_Cases",
+        "expected_title_contains": "Acme Cases"
+      },
+      "on_failure": "pause"
+    },
+    {
+      "id": "step_003",
+      "kind": "loop",
+      "description": "Process each new case in the Acme Cases list view",
+      "details": {
+        "over": "__drain__",
+        "body": [
+          "step_004",
+          "step_007",
+          "step_008",
+          "step_009",
+          "step_010",
+          "step_011",
+          "step_012",
+          "step_013",
+          "step_014",
+          "step_015"
+        ]
+      },
+      "on_failure": "pause"
+    },
+    {
+      "id": "step_004",
+      "kind": "ui_action",
+      "description": "Click on the first case row link in the Acme Cases list (drain sentinel)",
+      "details": {
+        "intent": "click",
+        "target_description": "First case number link in the Acme Cases list view"
+      },
+      "on_failure": "pause"
+    },
+    {
+      "id": "step_007",
+      "kind": "extract",
+      "description": "Extract the contact name from the email feed on the case",
+      "details": {
+        "variable_name": "contact_name",
+        "description": "The sender's name mentioned in the email body of the case feed (e.g., Rachel Torres)."
+      },
+      "on_failure": "pause"
+    },
+    {
+      "id": "step_008",
+      "kind": "sequence",
+      "description": "Set Contact Name via inline pencil edit — click pencil, type, wait for inline dropdown, click result to create pill",
+      "details": {
+        "steps": [
+          {"kind": "click_pencil_icon", "target": "Contact Name"},
+          {"kind": "fill_field", "label": "Contact Name", "value": "${contact_name}"},
+          {"kind": "click_dropdown_result", "text": "${contact_name}"}
+        ]
+      },
+      "success_condition": "The Contact Name field on the case record shows '${contact_name}' as a linked-record pill in read-only view",
+      "on_failure": "pause"
+    },
+    {
+      "id": "step_009",
+      "kind": "ui_action",
+      "description": "Save the Contact Name update",
+      "details": {
+        "intent": "click",
+        "target_description": "Save button on the Case Details inline-edit footer"
+      },
+      "success_condition": "The Contact Name field is in read-only view mode — no inline-edit Save/Cancel footer is active on the page",
+      "on_failure": "pause"
+    },
+    {
+      "id": "step_010",
+      "kind": "sequence",
+      "description": "Set Case Status to Escalated via inline picklist",
+      "details": {
+        "steps": [
+          {"kind": "select_dropdown_option", "label": "Status", "value": "Escalated"}
+        ]
+      },
+      "success_condition": "The Status field on the case record shows 'Escalated' in read-only view",
+      "on_failure": "pause"
+    },
+    {
+      "id": "step_011",
+      "kind": "ui_action",
+      "description": "Save the Status update",
+      "details": {
+        "intent": "click",
+        "target_description": "Save button on the Case Details inline-edit footer"
+      },
+      "success_condition": "The Status field shows 'Escalated' in read-only view mode — no inline-edit Save/Cancel footer is active on the page",
+      "on_failure": "pause"
+    },
+    {
+      "id": "step_012",
+      "kind": "ui_action",
+      "description": "Click on the Related tab",
+      "details": {
+        "intent": "click",
+        "target_description": "Related tab on the Case page"
+      },
+      "success_condition": "The Related tab is currently the active/selected tab on the case page and its content is visible",
+      "on_failure": "pause"
+    },
+    {
+      "id": "step_013",
+      "kind": "ui_action",
+      "description": "Create a Call task assigned to Shrey Sharma with all required fields",
+      "details": {
+        "intent": "create_task",
+        "target_description": "New Task button in the Open Activities section, then fill and save the New Task modal",
+        "fields": {
+          "Subject": "Call",
+          "Assigned To": "Shrey Sharma",
+          "Due Date": "today's date",
+          "Comments": "talk to ${contact_name} and investigate the issue",
+          "Status": "In Progress"
+        }
+      },
+      "success_condition": "A task with Subject 'Call' assigned to 'Shrey Sharma' is visible in the Open Activities section of the Related tab on this case",
+      "on_failure": "pause"
+    },
+    {
+      "id": "step_014",
+      "kind": "wait",
+      "description": "Wait for the task creation to complete",
+      "details": {
+        "seconds": 2.0,
+        "reason": "Allow the task creation toast notification to clear and the UI to refresh."
+      },
+      "on_failure": "pause"
+    },
+    {
+      "id": "step_015",
+      "kind": "navigate",
+      "description": "Navigate back to the Acme Cases list view",
+      "details": {
+        "url": "https://sumitpaliw-250428-644-demo.lightning.force.com/lightning/o/Case/list?filterName=Acme_Cases",
+        "expected_title_contains": "Acme Cases"
+      },
+      "on_failure": "pause"
+    }
+  ],
+  "decision_rules": [
+    {
+      "rule": "Only process cases that have a status of 'New' in the Acme Cases list view.",
+      "inferred_from": "Narration: 'Once I click on that and if I see any new cases with a status as new, that's a case which I'm supposed to work on.'"
+    },
+    {
+      "rule": "Each processing step self-skips if its target state is already present, making the plan idempotent for any partial-completion state.",
+      "inferred_from": "Per-step success_conditions checked before acting; the drain loop's backstop pauses if the same record is served twice."
+    }
+  ],
+  "required_credentials": [
+    {
+      "name": "Salesforce",
+      "scopes": [
+        "LightningExperience"
+      ]
+    }
+  ],
+  "source_video_id": "7e209d1549e3",
+  "created_at": "2026-06-30T07:24:57.056762",
+  "created_by": null,
+  "approved_at": null,
+  "approved_by": null,
+  "correction_history": ["Replaced coarse has_Call_task extract+decision with per-step success_conditions for full idempotency across all partial states. Merged New Task click + form fill into one create_task step. Added drain backstop for stuck-loop detection."]
+}

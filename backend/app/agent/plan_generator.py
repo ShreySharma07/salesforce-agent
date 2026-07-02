@@ -36,7 +36,9 @@ Plan schema (strict):
       "id": "step_001",
       "kind": "<navigate|ui_action|mcp_call|extract|decision|loop|wait|human_input|notify>",
       "description": "<one-line description>",
-      "details": { ...kind-specific... }
+      "details": { ...kind-specific... },
+      "success_condition": "<plain-English end state this step must produce, or omit>",
+      "on_failure": "pause"
     }
   ],
   "decision_rules": [
@@ -46,6 +48,25 @@ Plan schema (strict):
     {"name": "<service>", "scopes": ["<scope>"]}
   ]
 }
+
+success_condition rules (CRITICAL — read before generating steps):
+  - Include success_condition ONLY on ui_action steps that change state.
+  - Omit success_condition for: navigate, wait, extract, decision, loop, mcp_call,
+    human_input, notify — these are not state-changing or are control-flow.
+  - Also omit for the drain-sentinel ui_action (the first body step that clicks a
+    row link) — its "success" is defined by whether it fails (list empty = done).
+  - Write conditions as a plain-English description of VISIBLE on-screen evidence:
+      • Field set:     "The <label> field shows '<value>' in read-only view"
+      • Lookup pill:   "The <label> field shows '<value>' as a linked-record pill"
+      • Record create: "A <type> with <key>='<value>' exists in <location>"
+      • Tab active:    "The <name> tab is currently the active/selected tab"
+      • Modal open:    "The <name> dialog/modal is open"
+      • Inline save:   "The <label> field is in read-only view — no inline-edit
+                        Save/Cancel footer active for that field"
+  - Variables like ${contact_name} are allowed — they are interpolated at runtime.
+  - The executor checks the condition BEFORE acting (skip if already satisfied)
+    and AFTER acting (verify before marking done). Every step with a
+    success_condition is therefore automatically idempotent.
 
 Step kind details schemas:
   navigate:    {"url": "...", "expected_title_contains": "..."}
@@ -70,19 +91,38 @@ Rules:
   - Infer decision rules: if the user is filtering, sorting, or selecting based on a property visible on screen, add a rule explaining the criterion.
 
 Thoroughness Rules:
-  - Be THOROUGH: produce one step for EVERY distinct action visible in the
-    captions — every click, type, navigation, selection, and read. Do not
-    collapse multiple actions into one step or skip "small" steps. A faithful
-    plan has as many steps as the recording has actions.
-  - For each ui_action, capture the EXACT on-screen label/text of the target
-    (button text, field label, link text, tab name) verbatim in
-    target_description, and the exact typed value in value.
-  - Preserve ORDER precisely as shown in the captions.
+  - Preserve ORDER precisely as shown in the captions. Never skip a logical
+    operation (navigating somewhere, opening a record, saving a form, etc.).
   - If the recording shows the user reading/looking at a value (a case number,
     an amount, a status), add an `extract` step for it — those reads are part
     of the task.
-  - Keep each step's "description" to one concise line, but never omit a step
-    to save space.
+  - Keep each step's "description" to one concise line.
+
+  FIELD-CHANGE CONSOLIDATION (critical for fast, reliable execution):
+  When the recording shows the user changing a field value — whether a picklist,
+  dropdown, combobox, date picker, or text field — emit EXACTLY ONE `ui_action`
+  step for the entire field-change sequence, regardless of how many sub-clicks
+  the user performed (e.g. clicking a pencil icon, opening a dropdown, clicking
+  an option). Use:
+    kind: "ui_action"
+    details.intent: "fill_field"
+    details.field_label: "<exact visible label of the field>"
+    details.value: "<the value to set>"
+  Do NOT decompose a field change into separate "click edit icon", "click
+  dropdown", "select option" steps. The executor's fill_field_by_label action
+  handles the entire sequence atomically.
+
+  FORM CONSOLIDATION: When the recording shows a modal or dialog form being
+  filled (e.g. New Task, New Case, Edit Record), emit ONE `ui_action` step per
+  FORM SUBMIT (i.e. per Save/Create button click). List all fields being set in
+  the description; include a details.fields object mapping field_label → value.
+  Do NOT emit a separate step for clicking into each field, opening each
+  dropdown, or selecting each value. Exception: if a field requires a distinct
+  navigation (e.g. opening a date picker calendar), it may be a separate step.
+
+  SAVE steps: After any inline-edit field change on a record page (NOT inside a
+  modal form), add one "click Save" step. Inside a modal form, the Save/Create
+  button click ends the form step itself — do not add an extra step for it.
 
 Navigation Rules (critical for Salesforce and web apps):
   - PREFER `navigate` steps with direct URLs over ui_action steps that click
@@ -195,7 +235,9 @@ Recurrence and Loop Generalization Rules:
               the list (e.g. "first case row link in the Acme Cases list").
               This is the DRAIN SENTINEL — when the list is empty this step
               fails and the executor treats it as "loop complete" (success).
-           b. Middle steps: completion check + per-item processing.
+              Do NOT set success_condition on the sentinel step.
+           b. Remaining steps: per-item processing, each with a
+              success_condition (see below).
            c. LAST step (mandatory): a `navigate` step back to the filtered
               list URL. This reloads the filtered list so the next drain
               iteration sees the updated rows. The loop will NOT work correctly
@@ -204,19 +246,18 @@ Recurrence and Loop Generalization Rules:
       There is nothing to enumerate upfront — the sentinel first step handles
       empty-list detection.
 
-  - COMPLETION CHECK (resumability / idempotency): Inside the drain loop body,
-    add immediately after the first-row-click step:
-      1. `extract` — variable_name "has_<marker>_task", on_failure "continue".
-         Description: instruct the agent to check the Related tab or Activities
-         section for the task that marks full case completion (e.g. a task with
-         Subject='Call'). Agent should respond ONLY 'YES' or 'NO'.
-      2. `decision` — condition "'YES' in str(has_<marker>_task).upper()",
-         if_true = [] (empty — skip processing; the unconditional navigate-back
-         at the end of the body still runs), if_false = [all processing step
-         IDs].
-      The navigate-back step is ALWAYS the last step in the loop body (not
-      inside the decision's branches) so it runs unconditionally every
-      iteration whether the case was skipped or processed.
+  - PER-STEP IDEMPOTENCY (replaces the old COMPLETION CHECK extract+decision):
+    Every state-changing step in the loop body carries a success_condition. The
+    executor checks it BEFORE acting — if already satisfied, the step self-skips.
+    This handles ALL partial-completion states automatically with no special-casing:
+      • Case already Escalated → Status step self-skips
+      • Call task already exists → create-task step self-skips
+      • Both done → all steps self-skip; navigate-back runs; next iteration finds
+        empty list; drain ends automatically
+      • Partially done (task but not Escalated, or vice versa) → only the
+        incomplete steps run; done steps skip
+    DO NOT emit a `decision` step or an `extract`+`decision` pair for idempotency.
+    Use success_conditions on the individual processing steps instead.
 
 Voice Narration Rules (when NARRATION lines are present in the timeline):
   - NARRATION lines contain the user's spoken explanation of what they were
@@ -364,6 +405,7 @@ def _build_plan_object(data: dict, *, source_video_id: str | None) -> Plan:
                 kind=kind,
                 description=raw.get("description", ""),
                 details=raw.get("details", {}) or {},
+                success_condition=raw.get("success_condition") or None,
                 on_failure=raw.get("on_failure", "pause"),
             )
         )

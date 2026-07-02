@@ -17,6 +17,7 @@ live screenshot; past turns contribute their text observation + a ref.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from typing import Any
 
@@ -26,6 +27,7 @@ from sandbox_agent.grounding import annotate_screenshot, compress_for_llm, extra
 from sandbox_agent.llm_client import GeminiClient
 from sandbox_agent.schemas import LoopIteration
 
+log = logging.getLogger("browser-react")
 
 SYSTEM_PROMPT = """You are a browser automation agent running a Reason-Act-Observe loop. You are given ONE goal and must accomplish it on a live web page by choosing one action at a time.
 
@@ -55,11 +57,14 @@ Actions:
   {"thought": "...", "action": "give_up", "reason": "<why the goal cannot be completed>"}
 
 Rules:
-  - Refer to elements only by the # ref shown in ELEMENTS. Never invent a ref.
-  - If you can SEE an element in the screenshot but it has NO #ref in ELEMENTS (e.g. a Salesforce datatable case-number link that renders inside closed shadow DOM), use `click_text` with its exact visible label. Do NOT scroll — the element is already visible and scrolling will not add a ref for it.
+  - Refer to elements only by the exact ref token shown in ELEMENTS (e.g. 53e1c303, fi0001, pw0000). A ref is a short alphanumeric string — NO '#' prefix, NOT a raw DOM id like '#1370'. Only use refs that appear in the CURRENT ELEMENTS list. Never invent a ref, reuse a stale ref from a prior observation, or prepend '#' to any token.
+  - If you can SEE an element in the screenshot but it has NO #ref in ELEMENTS (e.g. a Salesforce datatable case-number link that renders inside closed shadow DOM), use `click_text` with its exact visible label. Do NOT scroll aimlessly — scrolling does not add refs for already-visible elements. Scrolling is ONLY allowed when you need to bring a specific named field's inline-edit pencil into view (e.g. scrolling the Details panel to reveal 'Edit Contact Name'); in that case scroll purposefully toward the known field label, then click it. One targeted scroll is acceptable; aimless multi-scroll exploration is not.
   - To fill or select a modal/record form field, use `fill_field_by_label` with the field's visible label text (e.g. label="Due Date", text="6/20/2026"). This crosses shadow DOM for both text inputs and comboboxes/dropdowns. Do NOT use `click_text` on a label — labels are not interactive inputs. Use `fill_field_by_label` for Subject, Due Date, Comments, Status, and all other form fields regardless of whether they have a #ref.
+  - INLINE-EDIT PICKLIST (Case Status, Priority, Type, or any picklist on a record page): the correct FIRST action is always `fill_field_by_label` with label="<field label>" and text="<target value>" (e.g. label="Status", text="Escalated"). Do NOT use `click_text` on the current field value (e.g. "New"), the label text (e.g. "Status"), or the asterisk-prefixed label ("*Status") — those waste many iterations. fill_field_by_label opens the picklist and selects the option in one call. Never attempt click_text for a picklist field.
   - RECORD LOOKUP fields (Contact Name, Account Name, Owner, any field where you type a name and Salesforce searches for matching records) work differently from picklists. Typing text is NOT enough — Salesforce makes an async search and you must SELECT the matching record from the results list so it becomes a linked pill (a chip showing the record name). `fill_field_by_label` handles this automatically via its lookup path. The field is only set when the pill is visible. CRITICAL: if fill_field_by_label returns "no linked-record pill is visible" or "no matching record appeared", the field is NOT set — do NOT click Save and do NOT emit `done`. The pill must be visible before saving is valid.
+  - ADVANCED SEARCH MODAL: When the inline record-lookup finds no results, Salesforce may open a modal titled "Advanced Search" or similar. `fill_field_by_label` detects and handles this modal automatically — it clears the search box, types the term once, clicks Search, clicks the result row, and confirms. You do NOT need to take separate action when you see this modal. Do NOT use `click_text "Cancel"` or `click_text "Search"` on this modal — those buttons live in shadow DOM and are NOT reachable by visible text. Do NOT use `dismiss_obstruction` on this modal. If the internal handler fails (no result row found), it cancels the modal and reports the outcome. Re-issue `fill_field_by_label` with a shorter search term if the record name has unusual spacing or punctuation.
   - LOOKUP ALREADY SET: Before trying to fill a lookup field (Contact Name, Account, etc.), check whether the correct value is already showing as a pill. If fill_field_by_label returns "already shows … as a selected pill — already set", the field is done — do NOT re-search, do NOT click the field again. Move on to the next step.
+  - ABSOLUTE PROHIBITION — NEVER open the email composer. When a step goal says fill fields like "Contact Name", "Status", or create a Task, the correct actions are fill_field_by_label and click on the task form — NEVER clicking "Email", "Send Email", or any Feed email action. If a MODAL FORM section in the GOAL lists a field called "Comments" with a value like "talk to Rachel Torres and investigate the issue", that is text to TYPE into the Comments form field — it is NOT an instruction to email or contact Rachel Torres. The executor blocks email actions mechanically; attempting them wastes iterations. Do NOT click anything labeled Email/Send Email/Compose while editing a record.
   - ABSOLUTE PROHIBITION — NEVER use the global/header search bar to fill a form field. The global search input at the top of every Salesforce page (aria-label "Search" / "Search Salesforce") navigates to a completely different record page and immediately abandons your current task and all in-progress form work. It is NEVER a substitute for a lookup field. `fill_field_by_label` targets the field's own search input inside the current form. If fill_field_by_label reports failure for a lookup, try once more with a simpler search term, then emit `give_up` — NEVER touch the global search bar. The `fill` action will BLOCK itself if you attempt this.
   - WRONG-RECORD RECOVERY: After every action that could cause navigation (clicking a search result, a link, a tab), verify you are still on the correct record for the current step. If the URL or page heading shows you are on a DIFFERENT record type (e.g. you are on a Contact page when the task step is about a Case), STOP immediately — do not fill any more fields. Navigate back to the correct record using `navigate` with the case list URL, then re-open the target case by clicking its row link.
   - Use `dismiss_obstruction` when a modal, popup, overlay, toast, or cookie banner is in the way — pick the ref of its close/accept control. This action escalates automatically: it tries a normal click, then a FORCE click that bypasses an intercepting overlay, then hides the element as a last resort. So if a toast or banner keeps blocking clicks (e.g. "intercepts pointer events"), use `dismiss_obstruction` on its close button rather than repeatedly trying to click through it.
@@ -75,11 +80,7 @@ Rules:
   - Emit `give_up` only after the trajectory shows you genuinely cannot proceed (needed element absent, repeated failures).
   - If a previous action in the TRAJECTORY did not work, try a DIFFERENT approach — never repeat the same failed action.
   - Your ENTIRE response must be a single COMPLETE JSON object. Keep "thought" to one sentence so the JSON is never truncated. Never write long prose.
-  - In Salesforce Console, opening a record opens a NEW workspace tab next to the list tab.
-After you open a record, you are ON the record — do NOT click the list tab again thinking
-you need to navigate there; that takes you BACKWARD. If you see both a list tab and a
-record tab, the record is already open; proceed with the task on the record (click
-Related, etc.). Only return to the list if the task explicitly requires another record.
+  - CONSOLE WORKSPACE TABS (biggest time-sink — read carefully): In Salesforce Console, clicking a case row opens a NEW workspace tab for that record alongside the list tab. Once the record tab is open (you can see the case number or case title in the top tab bar), you ARE on the record — do NOT click the list tab. Clicking the list tab navigates you BACKWARD to the list, abandoning all in-progress work on the record. If you see BOTH a list tab AND a record tab in the header, the record IS already open — proceed with your task on the record (edit fields, click Related, etc.). Do NOT click "back" to the list, do NOT click the list tab at any point during case processing. The only step that navigates back to the list is the explicit navigate step at the end of the loop body — all other mid-task navigation to the list is WRONG and wastes time.
   - After an INLINE EDIT on a Salesforce record field (editing a field directly on the record page, not inside a modal), a docked form footer appears at the bottom of the page with Save and Cancel buttons. These are grounded in ELEMENTS as button 'Save' and button 'Cancel' (look in [FOOTER] or [MAIN] sections). Click their ref directly. If no ref appears for Save, use `click_text` with text "Save" — the footer is docked and always visible at the bottom; do NOT scroll to find it.
   - `done` requires SPECIFIC, VISIBLE, ON-SCREEN EVIDENCE that you can see RIGHT NOW on the current page. Do NOT emit `done` immediately after clicking Save — always wait for the next observation to confirm the save actually succeeded. Required visible evidence for a save: a "Record saved" toast appearing, the field showing the new value in read-only (non-edit) mode, or the new record appearing in a list. "I clicked Save" is NOT evidence — the click may have failed silently or the save may still be in progress.
   - For STATE-CHANGING steps (creating records, editing fields, saving forms): the step is only `done` after you observe visible confirmation the change PERSISTED — a success toast, the field updated to the new value in view mode, or the new item appearing in a list. A click on Save STARTS the save; it does NOT confirm it. Always observe the RESULT before emitting `done`.
@@ -108,13 +109,23 @@ RULE 7 — PLAN SCOPE: every action must serve the current step's stated goal. D
 
 RULE 8 — NEVER MODIFY CONFIGURATION: do NOT touch any Salesforce list-view filters, saved views, sort settings, column configuration, or any administrative setting. If a filtered list view (e.g. Acme Cases filtered to Status=New) is empty, that means no cases match today — it is a VALID and CORRECT result. Do NOT remove the filter, do NOT change the view, do NOT click "Edit" on the view to broaden it. Treat an empty filtered list as the final answer for the step.
 
-RULE 9 — LITERAL EXECUTION MODE: You are running a pre-approved plan, not discovering a task from scratch. Each step tells you EXACTLY what to do (action + target + value). Attempt that exact action FIRST. Do NOT explore the page, open menus, try alternative controls, or reason about other approaches UNLESS the specified action fails or is blocked. The pattern is: (1) attempt the planned action, (2) observe the result, (3) emit `done` if it worked, or recover minimally if it failed. Do not improvise beyond what recovery requires.
+RULE 9 — LITERAL EXECUTION MODE: You are running a pre-approved plan. Each step tells you exactly what to do. On ITERATION 1, issue the planned action immediately using the correct tool — do NOT scroll, do NOT explore, do NOT open menus first. Tool routing: form/lookup fields → `fill_field_by_label`; element with a known ref → `click ref`; visible text with no ref → `click_text`. The pattern is: (1) issue the planned action with the right tool directly, (2) observe the result, (3) emit `done` if it worked, recover minimally only if it explicitly failed. A first iteration that is only a scroll or navigation that was NOT required by the step is WRONG — it wastes an entire iteration. Every second matters: attempt the real action immediately. FORBIDDEN EXPLORATION: clicking Email / Send Email / compose, clicking Feed action buttons, opening Activity composer, clicking list tab mid-record — any of these that are not in the plan step are OUT OF SCOPE and will be mechanically blocked.
+
+=== TARGET-STATE PROTOCOL (RULES 10–12) ===
+
+When a step includes a SUCCESS CONDITION, these rules apply on top of Rules 1–9.
+
+RULE 10 — PRE-CHECK BEFORE ACTING: At your FIRST observation for any step that has a SUCCESS CONDITION, examine the current screenshot BEFORE choosing any action. Ask: "Is the SUCCESS CONDITION already satisfied right now?" If YES — emit `done` immediately with the visible evidence. Take NO action. This is the idempotency rule: the step is complete regardless of whether you did the work, a previous run did it, or a human did it. Never redo work whose result is already visible.
+
+RULE 11 — POST-ACTION VERIFY: After performing the step's action, the next observation must confirm the SUCCESS CONDITION holds before you emit `done`. Required evidence is determined by the condition itself: field in read-only mode showing the new value, a record appearing in a list, a modal that is open, a tab that is selected. A click alone is not confirmation.
+
+RULE 12 — NO DUPLICATES: For steps whose SUCCESS CONDITION describes a record or item that must exist (e.g. "a Call task exists in Open Activities"), look for that item FIRST before creating it. If it already exists, emit `done` with that evidence. Never create a duplicate.
 """
 
 
 # How many of the most recent iterations to render verbatim in the trajectory.
 # Older turns are compressed to one line each to bound prompt size.
-RECENT_TURNS = 5
+RECENT_TURNS = 4
 
 
 # ---------------------------------------------------------------------------
@@ -122,21 +133,33 @@ RECENT_TURNS = 5
 # ---------------------------------------------------------------------------
 
 def parse_action(text: str) -> dict | None:
+    import re as _re
     t = (text or "").strip()
     if t.startswith("```"):
         lines = t.splitlines()[1:]
         if lines and lines[-1].strip().startswith("```"):
             lines = lines[:-1]
         t = "\n".join(lines).strip()
+    # Fast path: well-formed JSON.
     try:
         return json.loads(t)
     except json.JSONDecodeError:
-        s, e = t.find("{"), t.rfind("}")
-        if s != -1 and e != -1 and e > s:
-            try:
-                return json.loads(t[s : e + 1])
-            except json.JSONDecodeError:
-                return None
+        pass
+    # Extract the outermost {...} block (handles prose wrapping the JSON).
+    s, e = t.find("{"), t.rfind("}")
+    if s == -1 or e == -1 or e <= s:
+        return None
+    candidate = t[s : e + 1]
+    try:
+        return json.loads(candidate)
+    except json.JSONDecodeError:
+        pass
+    # Lenient repair: strip trailing commas before ] or } — the most common
+    # model mistake that produces otherwise valid JSON.
+    repaired = _re.sub(r",\s*([}\]])", r"\1", candidate)
+    try:
+        return json.loads(repaired)
+    except json.JSONDecodeError:
         return None
 
 
@@ -592,6 +615,46 @@ def _action_satisfied_goal(observation: str, step_intent: str, kind: str) -> boo
     return False
 
 
+def _extract_completed_fields(trace: list["LoopIteration"]) -> list[str]:
+    """Return field labels already successfully set in this step's trace.
+
+    Scanned after a JSON parse failure so the retry/next-iteration prompt can
+    tell the agent which fields are done and must not be re-filled.
+    """
+    done: list[str] = []
+    _SUCCESS_TOKENS = ("filled", "selected", "pill confirmed", "already set", "typed and selected")
+    for it in trace:
+        if it.action == "fill_field_by_label" and it.observation:
+            obs = it.observation.lower()
+            if any(tok in obs for tok in _SUCCESS_TOKENS):
+                if isinstance(it.action_args, dict):
+                    lbl = it.action_args.get("label", "")
+                    if lbl and lbl not in done:
+                        done.append(lbl)
+    return done
+
+
+def _is_transient_llm_error(err_str: str) -> bool:
+    """True when the LLM error is likely transient (network / rate-limit) and worth retrying.
+
+    Matches both errors surfaced by the backend proxy (e.g. 'APIConnectionError: ...')
+    and raw HTTP status codes returned by the proxy endpoint itself.
+    """
+    e = err_str.lower()
+    return (
+        "apiconnectionerror" in e
+        or "apitimeouterror" in e
+        or "connection error" in e
+        or "connection reset" in e
+        or "timed out" in e or "timeout" in e
+        or "temporarily unavailable" in e
+        or "proxy unreachable" in e   # raised by llm_client.py on httpx.HTTPError
+        or "503" in e or "502" in e or "529" in e
+        or "rate_limit" in e or "429" in e
+        or "overloaded" in e
+    )
+
+
 # ---------------------------------------------------------------------------
 # The ReAct loop
 # ---------------------------------------------------------------------------
@@ -602,6 +665,7 @@ def execute_step(
     step_intent: str,
     *,
     memory_hint: str = "",
+    success_condition: str = "",
     max_iterations: int = 20,
     max_seconds: float = 400.0,
     screenshot_dir: str | None = None,
@@ -620,6 +684,10 @@ def execute_step(
     """
     trace: list[LoopIteration] = []
     started = time.monotonic()
+    # Screenshot economy: reuse the annotated screenshot when the page hasn't
+    # changed (same URL + same grounded elements) to avoid redundant image tokens.
+    _cached_screenshot: bytes | None = None
+    _cached_fingerprint: str = ""
 
     for iteration in range(1, max_iterations + 1):
         if time.monotonic() - started > max_seconds:
@@ -628,7 +696,17 @@ def execute_step(
         iter_start = time.monotonic()
 
         # ---------- OBSERVE ----------
-        wait_for_stable(page)
+        # On the very first iteration the page was already stabilised by the
+        # previous step (either page.goto() waited for load, or the prior ReAct
+        # loop's last OBSERVE-ACT cycle left the page settled). Skip the
+        # expensive networkidle wait (up to 7 s) and just clear any remaining
+        # LWC spinners + do a short settle. On subsequent iterations an action
+        # may have triggered rendering, so full wait_for_stable is needed.
+        if iteration == 1:
+            _wait_for_lwc_spinners(page, timeout=1.5)
+            time.sleep(0.2)
+        else:
+            wait_for_stable(page)
         _sf_dismiss_toasts(page)   # hide toasts BEFORE grounding so they don't intercept clicks
         url = page.url
         try:
@@ -637,23 +715,36 @@ def execute_step(
             title = ""
         elements = extract_from_page(page, already_stable=True)
         elements_text = render_for_prompt(elements)
-        try:
-            screenshot = page.screenshot(type="png")
-        except Exception as e:
-            # A failed screenshot shouldn't kill the step — record and retry.
-            trace.append(LoopIteration(
-                iteration=iteration, thought="", action="(observe)",
-                observation="", error=f"screenshot failed: {e}",
-                latency_ms=int((time.monotonic() - iter_start) * 1000),
-            ))
-            time.sleep(1)
-            continue
 
-        screenshot = annotate_screenshot(screenshot, elements)
+        # Build a cheap page fingerprint: URL + hash of grounded element text.
+        # If both are unchanged since last iteration, the page looks the same
+        # and we can reuse the previous annotated screenshot — saving image tokens.
+        _fingerprint = f"{url}|{hash(elements_text)}"
+        if _fingerprint == _cached_fingerprint and _cached_screenshot is not None:
+            screenshot = _cached_screenshot  # reuse — no Playwright + PIL overhead
+        else:
+            try:
+                screenshot = annotate_screenshot(page.screenshot(type="png"), elements)
+                _cached_screenshot = screenshot
+                _cached_fingerprint = _fingerprint
+            except Exception as e:
+                if _cached_screenshot is not None:
+                    screenshot = _cached_screenshot  # fall back to cache on error
+                else:
+                    trace.append(LoopIteration(
+                        iteration=iteration, thought="", action="(observe)",
+                        observation="", error=f"screenshot failed: {e}",
+                        latency_ms=int((time.monotonic() - iter_start) * 1000),
+                    ))
+                    time.sleep(1)
+                    continue
+
         screenshot_ref = _maybe_save_screenshot(screenshot, screenshot_dir, iteration)
 
         # ---------- REASON ----------
         prompt_parts = [f"GOAL: {step_intent}"]
+        if success_condition:
+            prompt_parts.append(f"SUCCESS CONDITION: {success_condition}")
         if memory_hint:
             prompt_parts.append(memory_hint)
         prompt_parts += [
@@ -668,15 +759,26 @@ def execute_step(
         if _stuck_nudge:
             prompt_parts.append(_stuck_nudge)
         if iteration == 1:
-            prompt_parts.append(
-                "MANDATORY STEP-ENTRY GOAL CHECK: This is your FIRST observation for this "
-                "step. Before choosing any action, examine the screenshot and ELEMENTS "
-                "carefully. If the step goal is already fully satisfied — the target field "
-                "already shows the correct value, the correct lookup pill already exists, "
-                "the record is already in the right state — emit `done` immediately with "
-                "specific visible evidence. Do NOT take any action on a goal that is "
-                "already met on screen."
-            )
+            if success_condition:
+                prompt_parts.append(
+                    "MANDATORY PRE-CHECK (RULE 10 — idempotency): This is your FIRST "
+                    "observation for this step. Look at the current screenshot RIGHT NOW "
+                    "and determine whether the SUCCESS CONDITION is already satisfied: "
+                    f"{success_condition}\n"
+                    "If YES — emit `done` immediately with the specific visible evidence. "
+                    "Take NO action. Only proceed to act if the condition is clearly NOT "
+                    "yet met on screen."
+                )
+            else:
+                prompt_parts.append(
+                    "MANDATORY STEP-ENTRY GOAL CHECK: This is your FIRST observation for "
+                    "this step. Before choosing any action, examine the screenshot and "
+                    "ELEMENTS carefully. If the step goal is already fully satisfied — "
+                    "the target field already shows the correct value, the correct lookup "
+                    "pill already exists, the record is already in the right state — emit "
+                    "`done` immediately with specific visible evidence. Do NOT take any "
+                    "action on a goal that is already met on screen."
+                )
         prompt_parts.append("Emit one action as JSON.")
         prompt = "\n\n".join(prompt_parts)
 
@@ -698,7 +800,7 @@ def execute_step(
                 ))
                 return _result("failed", "LLM daily quota exhausted", trace,
                                quota_exhausted=True)
-            # Transient Gemini image error — wait, fresh screenshot, one retry.
+            # Transient image error — one fresh-screenshot retry.
             if "Unable to process input image" in err_str or "INVALID_ARGUMENT" in err_str:
                 time.sleep(2)
                 try:
@@ -710,12 +812,43 @@ def execute_step(
                 except Exception as retry_err:
                     trace.append(LoopIteration(
                         iteration=iteration, action="(reason)",
-                        error=f"LLM image error after retry: {type(retry_err).__name__}: {retry_err}",
+                        error=f"LLM image error (bad frame — skipping iteration): {type(retry_err).__name__}: {retry_err}",
                         screenshot_ref=screenshot_ref,
                         latency_ms=int((time.monotonic() - iter_start) * 1000),
                     ))
-                    return _result("failed", "LLM image error after retry", trace)
+                    continue  # re-observe on next iteration with a fresh screenshot
+            # Transient network / API error — exponential backoff, 3 retries (1s/2s/4s).
+            # Covers APIConnectionError, httpx timeouts, 429/502/503 from the backend proxy.
+            elif _is_transient_llm_error(err_str):
+                response = None
+                _retry_err_str = err_str
+                for _attempt in range(3):
+                    _wait_s = 2 ** _attempt  # 1 s → 2 s → 4 s
+                    log.warning(
+                        "transient LLM error (attempt %d/3), retry in %ds: %s",
+                        _attempt + 1, _wait_s, err_str[:200],
+                    )
+                    time.sleep(_wait_s)
+                    try:
+                        response = llm.generate(
+                            prompt=prompt, system=SYSTEM_PROMPT,
+                            images=[screenshot], json_mode=True, max_tokens=2048,
+                        )
+                        break
+                    except Exception as _re:
+                        _retry_err_str = str(_re)
+                        if not _is_transient_llm_error(_retry_err_str):
+                            break  # escalated to non-transient; stop retrying
+                if response is None:
+                    trace.append(LoopIteration(
+                        iteration=iteration, action="(reason)",
+                        error=f"LLM transient error (retries exhausted): {_retry_err_str}",
+                        screenshot_ref=screenshot_ref,
+                        latency_ms=int((time.monotonic() - iter_start) * 1000),
+                    ))
+                    continue  # skip iteration; next turn re-observes the page
             else:
+                # Non-transient error (auth failure, bad request, etc.) — fail the step.
                 trace.append(LoopIteration(
                     iteration=iteration, action="(reason)",
                     error=f"LLM error: {type(llm_err).__name__}: {llm_err}",
@@ -729,20 +862,21 @@ def execute_step(
         out_tok = getattr(response, "output_tokens", 0) or 0
 
         if action is None:
-            # One corrective retry: occasionally the model wraps JSON in prose
-            # or emits a partial object. Re-ask tersely for JSON only before
-            # burning the whole iteration.
+            # One corrective retry: demand ONLY minified JSON with a shorter
+            # max_tokens budget so the response is less likely to be truncated.
             try:
                 retry_prompt = (
                     prompt
-                    + "\n\nYour previous response could not be parsed as JSON. "
-                    "Respond with EXACTLY ONE complete JSON object and nothing "
-                    "else — no prose, no markdown, no code fences. Keep "
-                    "\"thought\" to one short sentence."
+                    + "\n\n=== JSON PARSE RETRY ===\n"
+                    "Your last response could not be parsed as JSON. "
+                    "Output ONLY a single minified JSON object — no prose, "
+                    "no markdown, no code fences. Start immediately with { "
+                    "and end with }. Keep \"thought\" to 5 words max. "
+                    'Example: {"thought":"clicking Save","action":"click","ref":"sf0001"}'
                 )
                 response = llm.generate(
                     prompt=retry_prompt, system=SYSTEM_PROMPT,
-                    images=[screenshot], json_mode=True, max_tokens=2048,
+                    images=[screenshot], json_mode=True, max_tokens=512,
                 )
                 action = parse_action(response.text)
                 in_tok += getattr(response, "input_tokens", 0) or 0
@@ -751,9 +885,19 @@ def execute_step(
                 action = None
 
         if action is None:
+            # Include which fields were already set so the next iteration
+            # doesn't re-fill them — the agent reads this from the trajectory.
+            _done_fields = _extract_completed_fields(trace)
+            _done_note = (
+                f" FIELDS ALREADY SET THIS STEP (do NOT re-fill): "
+                f"{', '.join(_done_fields)}." if _done_fields else ""
+            )
             trace.append(LoopIteration(
                 iteration=iteration, action="(unparseable)",
-                observation="could not parse model output as JSON (after one retry)",
+                observation=(
+                    f"could not parse model output as JSON (after retry).{_done_note} "
+                    f"On the next turn continue with remaining fields only."
+                ),
                 error="parse_failure", screenshot_ref=screenshot_ref,
                 input_tokens=in_tok, output_tokens=out_tok,
                 latency_ms=int((time.monotonic() - iter_start) * 1000),
@@ -761,8 +905,22 @@ def execute_step(
             continue
 
         kind = action.get("action", "")
+        # Repair: Claude sometimes emits {"action":"","click":"click","ref":"..."} —
+        # the verb ends up as a top-level key with an empty "action" field.
+        if not kind:
+            _ACTION_VERBS = {
+                "click", "click_text", "fill", "fill_field_by_label", "press",
+                "navigate", "open_app", "scroll", "wait", "dismiss_obstruction",
+                "captcha_detected", "done", "give_up",
+            }
+            for _k in action:
+                if _k in _ACTION_VERBS:
+                    kind = _k
+                    break
         thought = action.get("thought", "")
-        action_args = {k: v for k, v in action.items() if k not in ("action", "thought")}
+        # Exclude the action kind key itself so repaired dicts don't leak it into args
+        # (e.g. {"action":"","click":"click","ref":"..."} → args={"ref":"..."} not {"click":"click","ref":"..."})
+        action_args = {k: v for k, v in action.items() if k not in ("action", "thought", kind)}
 
         # ---------- terminal actions ----------
         if kind == "done":
@@ -810,6 +968,50 @@ def execute_step(
                 latency_ms=int((time.monotonic() - iter_start) * 1000),
             ))
             continue
+
+        # ---------- EMAIL / COMPOSE GUARD (mechanical, model cannot override) ----------
+        # Opening the email composer is NEVER correct for tasks that only edit
+        # fields and create Task records. If the step's intent doesn't involve
+        # email, refuse any action whose target text matches email-UI patterns.
+        # This fires on click_text (unlabeled buttons like "Email" in the feed)
+        # and on click (grounded elements whose name contains email patterns).
+        if "email" not in step_intent.lower() and kind in ("click", "click_text", "navigate"):
+            _act_target = str(action.get("text", "")).lower()
+            if kind == "click":
+                _act_target += " " + str(action.get("ref", ""))
+                # Supplement with grounded element name so the guard catches
+                # ref-based clicks on the Email action button too.
+                _ref_str = str(action.get("ref", ""))
+                if elements is not None and _ref_str:
+                    _gel = elements.by_ref(_ref_str) if hasattr(elements, "by_ref") else None
+                    if _gel is not None:
+                        _act_target += " " + (_gel.name or "").lower()
+            if kind == "navigate":
+                _act_target = str(action.get("url", "")).lower()
+            _EMAIL_UI = (
+                "email", "send email", "choose email addresses",
+                "compose", "email address", "email message",
+                "/email", "emailmessage",
+            )
+            if any(_pat in _act_target for _pat in _EMAIL_UI):
+                _email_blocked = (
+                    "BLOCKED: this action targets the email composer or email UI, which "
+                    "is NOT part of this task. This task ONLY edits case fields (Contact "
+                    "Name, Status) and creates a Task record — it NEVER sends, composes, "
+                    "or interacts with email. The Comments field value in the task form is "
+                    "text to TYPE into the form box, not an instruction to email anyone. "
+                    "Abandon this approach. Go back to the planned action: use "
+                    "fill_field_by_label for form fields, click the pencil edit icon if a "
+                    "field is read-only, or navigate back to the case record."
+                )
+                trace.append(LoopIteration(
+                    iteration=iteration, thought=thought, action=kind,
+                    action_args=action_args, observation=_email_blocked,
+                    error="blocked_email", screenshot_ref=screenshot_ref,
+                    input_tokens=in_tok, output_tokens=out_tok,
+                    latency_ms=int((time.monotonic() - iter_start) * 1000),
+                ))
+                continue
 
         # ---------- ACT ----------
         try:
@@ -861,6 +1063,42 @@ def _poll_for_option(page: "Page", text: str, *, deadline_s: float = 3.0):
     return None
 
 
+def _poll_for_inline_option(page: "Page", combo, text: str, *, deadline_s: float = 5.0):
+    """Poll for the inline lookup dropdown option, scoped to *combo* first.
+
+    Searching within the combobox element is more specific than a page-wide
+    search — it avoids accidentally picking up global-search suggestions or
+    options from other open dropdowns on the page.
+
+    Falls back to a page-wide [role=option] search to catch Salesforce LWC
+    options that are rendered outside the combobox host element (e.g. in a
+    portal overlay anchored to the document body).
+
+    Returns the first visible matching Locator, or None on timeout.
+    """
+    deadline = time.time() + deadline_s
+    while time.time() < deadline:
+        # 1. Combo-scoped: highest specificity — won't confuse global-search options.
+        for exact in (True, False):
+            try:
+                opt = combo.get_by_role("option", name=text, exact=exact).first
+                if opt.is_visible(timeout=200):
+                    return opt
+            except Exception:
+                pass
+        # 2. Page-wide fallback: catches SF LWC options rendered in a portal
+        #    overlay outside the combobox DOM subtree.
+        for exact in (True, False):
+            try:
+                opt = page.get_by_role("option", name=text, exact=exact).first
+                if opt.is_visible(timeout=200):
+                    return opt
+            except Exception:
+                pass
+        time.sleep(0.25)
+    return None
+
+
 def _verify_lookup_pill(page: "Page") -> bool:
     """Return True when a Salesforce lookup field shows a selected-record pill.
 
@@ -900,6 +1138,216 @@ def _lookup_pill_has_value(page: "Page", text: str) -> bool:
         return False
 
 
+# ---------------------------------------------------------------------------
+# SEQUENCE step primitives — deterministic sub-actions (no LLM involvement)
+# ---------------------------------------------------------------------------
+
+def check_sequence_condition(page: "Page", condition: str) -> bool:
+    """Lightweight Playwright check for SEQUENCE step success conditions.
+
+    Covers the two patterns used in inline-edit sequences:
+      "shows '...' as a linked-record pill" → _lookup_pill_has_value
+      "shows '...' in read-only view"        → visible text check
+    Returns False (don't skip) for unknown patterns.
+    """
+    import re as _re
+    m = _re.search(r"shows '([^']+)' as a linked-record pill", condition, _re.I)
+    if m:
+        return _lookup_pill_has_value(page, m.group(1))
+    m = _re.search(r"shows '([^']+)' in read-only view", condition, _re.I)
+    if m:
+        val = m.group(1)
+        try:
+            return page.get_by_text(val, exact=True).first.is_visible(timeout=500)
+        except Exception:
+            return False
+    return False
+
+
+def execute_sequence_sub_action(page: "Page", kind: str, sub: dict) -> str:
+    """Dispatch one SEQUENCE sub-action. Returns an observation string.
+    A string starting with 'FAILED' signals the executor to abort the sequence."""
+    dispatch = {
+        "click_pencil_icon":      lambda: _seq_click_pencil_icon(page, sub.get("target", "")),
+        "fill_field":             lambda: _seq_fill_field(page, sub.get("label", ""), sub.get("value", "")),
+        "click_dropdown_result":  lambda: _seq_click_dropdown_result(page, sub.get("text", "")),
+        "select_dropdown_option": lambda: _seq_select_dropdown_option(page, sub.get("label", ""), sub.get("value", "")),
+        "click_save_footer":      lambda: _seq_click_save_footer(page),
+    }
+    fn = dispatch.get(kind)
+    if fn is None:
+        return f"FAILED: unknown sequence sub-action kind '{kind}'"
+    return fn()
+
+
+def _seq_click_pencil_icon(page: "Page", target_field: str) -> str:
+    """Scroll to find + click the inline-edit pencil for target_field.
+
+    SF renders inline-edit pencils as button[aria-label='Edit <Field>'].
+    They may be off-screen; scroll the Details panel until found (max 4 attempts).
+    """
+    if not target_field:
+        return "FAILED: click_pencil_icon requires a target field name"
+    for _scroll_attempt in range(4):
+        for exact in (True, False):
+            try:
+                btn = page.get_by_role("button", name=f"Edit {target_field}", exact=exact).first
+                if btn.is_visible(timeout=400):
+                    btn.scroll_into_view_if_needed(timeout=1500)
+                    btn.click(timeout=2000)
+                    time.sleep(0.5)
+                    return f"clicked 'Edit {target_field}' inline pencil"
+            except Exception:
+                pass
+        if _scroll_attempt < 3:
+            try:
+                page.mouse.wheel(0, 350)
+                time.sleep(0.35)
+            except Exception:
+                pass
+    return f"FAILED: could not find 'Edit {target_field}' inline pencil after 3 scroll attempts"
+
+
+def _seq_fill_field(page: "Page", label: str, value: str) -> str:
+    """Type *value* into the inline lookup input using real keyboard events.
+
+    Assumes the field is already in inline-edit mode (pencil was clicked).
+    Uses keyboard.type() — NOT synthetic .fill() — so Salesforce SOQL fires.
+    Does NOT click the dropdown result; that is click_dropdown_result's job.
+    """
+    if not label or not value:
+        return f"FAILED: fill_field requires label and value (got {label!r}, {value!r})"
+    located = False
+    for exact in (True, False):
+        try:
+            combo = page.get_by_role("combobox", name=label, exact=exact).first
+            if combo.is_visible(timeout=800):
+                inner = combo.locator("input").first
+                inner.click(timeout=1200)
+                located = True
+                break
+        except Exception:
+            pass
+    if not located:
+        for exact in (True, False):
+            try:
+                tb = page.get_by_role("textbox", name=label, exact=exact).first
+                if tb.is_visible(timeout=500):
+                    tb.click(timeout=800)
+                    located = True
+                    break
+            except Exception:
+                pass
+    page.keyboard.press("Control+a")
+    page.keyboard.press("Delete")
+    time.sleep(0.1)
+    page.keyboard.type(value, delay=60)
+    suffix = " (located)" if located else " (by current focus)"
+    return f"typed {value!r} into {label!r}{suffix}"
+
+
+def _seq_click_dropdown_result(page: "Page", text: str) -> str:
+    """Wait for the inline lookup dropdown and click the matching option.
+
+    This is the primitive that creates the linked-record PILL — the step that
+    was missing from previous approaches.  Polls up to 6 s for a [role=option]
+    matching *text*.  Does NOT fall back to Advanced Search — if no inline
+    option appears it returns FAILED so the caller can retry.
+    """
+    if not text:
+        return "FAILED: click_dropdown_result requires text"
+    deadline = time.time() + 6.0
+    while time.time() < deadline:
+        # If the Advanced Search modal opened, cancel it; do not escalate.
+        try:
+            modal = page.locator('[role="dialog"]').first
+            if modal.is_visible(timeout=150):
+                try:
+                    page.get_by_role("button", name="Cancel").first.click(timeout=1500)
+                    time.sleep(0.3)
+                except Exception:
+                    pass
+                return (
+                    f"FAILED: Advanced Search modal appeared while waiting for inline "
+                    f"dropdown for {text!r} — modal cancelled; re-run fill_field to retry"
+                )
+        except Exception:
+            pass
+        for exact in (True, False):
+            try:
+                opt = page.get_by_role("option", name=text, exact=exact).first
+                if opt.is_visible(timeout=200):
+                    opt.click(timeout=2000)
+                    time.sleep(0.6)
+                    if _verify_lookup_pill(page):
+                        return f"clicked inline dropdown result {text!r} — pill confirmed"
+                    time.sleep(0.5)
+                    if _verify_lookup_pill(page):
+                        return f"clicked inline dropdown result {text!r} — pill confirmed (delayed)"
+                    return (
+                        f"clicked inline dropdown result for {text!r} but no linked-record "
+                        f"pill appeared — field may not be set correctly"
+                    )
+            except Exception:
+                pass
+        time.sleep(0.3)
+    return (
+        f"FAILED: no inline dropdown option appeared for {text!r} after 6 s — "
+        f"SOQL may not have fired; re-run fill_field and retry"
+    )
+
+
+def _seq_select_dropdown_option(page: "Page", label: str, value: str) -> str:
+    """Open a Salesforce inline-edit picklist and select *value*.
+
+    Works for Status, Priority, Type, and similar picklist fields.
+    """
+    if not label or not value:
+        return "FAILED: select_dropdown_option requires label and value"
+    for exact in (True, False):
+        try:
+            combo = page.get_by_role("combobox", name=label, exact=exact).first
+            combo.click(timeout=3000)
+            _wait_for_lwc_panel(page)
+            for opt_exact in (True, False):
+                try:
+                    page.get_by_role("option", name=value, exact=opt_exact).first.click(timeout=2000)
+                    return f"selected {value!r} from {label!r} picklist"
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    # Fallback: lightning-combobox sometimes exposes a button
+    try:
+        page.get_by_role("button", name=label).first.click(timeout=2000)
+        _wait_for_lwc_panel(page)
+        page.get_by_role("option", name=value, exact=True).first.click(timeout=2000)
+        return f"selected {value!r} from {label!r} (button path)"
+    except Exception:
+        pass
+    return f"FAILED: could not select {value!r} from {label!r} dropdown"
+
+
+def _seq_click_save_footer(page: "Page") -> str:
+    """Click the docked inline-edit footer Save button."""
+    for exact in (True, False):
+        try:
+            btn = page.get_by_role("button", name="Save", exact=exact).first
+            if btn.is_visible(timeout=1000):
+                btn.click(timeout=2000)
+                time.sleep(0.5)
+                return "clicked Save in inline-edit footer"
+        except Exception:
+            pass
+    try:
+        page.get_by_text("Save", exact=True).first.click(timeout=2000)
+        time.sleep(0.5)
+        return "clicked Save (text fallback)"
+    except Exception:
+        pass
+    return "FAILED: could not find Save button in inline-edit footer"
+
+
 def _is_global_search_bar(loc) -> bool:
     """Return True if *loc* resolves to the page-level Salesforce search bar.
 
@@ -925,6 +1373,125 @@ def _is_global_search_bar(loc) -> bool:
         """))
     except Exception:
         return False
+
+
+def _handle_advanced_search_modal(page: "Page", search_term: str, label: str) -> str | None:
+    """Detect and operate the Salesforce Advanced Search modal opened after inline lookup fails.
+
+    Salesforce opens this dialog when the inline lookup dropdown cannot resolve a record.
+    Protocol: (1) detect the dialog, (2) clear its search box and type the term ONCE,
+    (3) click Search, (4) click the matching result row (radio/link/row via AX tree),
+    (5) confirm with Select/Done. Cancel via get_by_role — NOT click_text (shadow DOM).
+
+    Returns an observation string on success or handled failure, or None if no modal found.
+    """
+    time.sleep(0.6)  # allow time for the modal to finish opening
+    try:
+        dialog = page.locator('[role="dialog"]').first
+        if not dialog.is_visible(timeout=1200):
+            return None
+    except Exception:
+        return None
+
+    # Confirm this looks like a lookup/search modal, not an unrelated dialog
+    try:
+        dialog_text = (dialog.inner_text(timeout=1000) or "").lower()
+        if not any(w in dialog_text for w in ("search", "lookup", "find", "select")):
+            return None
+    except Exception:
+        pass  # can't read text — proceed anyway, dialog IS visible
+
+    # 1. Clear the search box and type the term once
+    search_filled = False
+    for role in ("searchbox", "textbox"):
+        try:
+            sb = dialog.get_by_role(role).first
+            if sb.is_visible(timeout=600):
+                sb.fill("", timeout=1500)
+                sb.fill(search_term, timeout=1500)
+                search_filled = True
+                break
+        except Exception:
+            pass
+
+    if not search_filled:
+        try:
+            page.get_by_role("button", name="Cancel", exact=False).first.click(timeout=2000)
+        except Exception:
+            pass
+        return (f"Advanced Search modal detected for {label!r} but could not access "
+                f"its search box — modal cancelled; try fill_field_by_label again")
+
+    # 2. Click the Search button to run the SOQL query
+    try:
+        dialog.get_by_role("button", name="Search", exact=False).first.click(timeout=2500)
+        time.sleep(1.5)
+    except Exception:
+        time.sleep(1.0)  # results may auto-load without a Search click
+
+    # 3. Click the matching result row — try radio (most common), link, then generic row
+    result_clicked = False
+    for role in ("radio", "link", "row"):
+        for exact in (True, False):
+            try:
+                result_loc = dialog.get_by_role(role, name=search_term, exact=exact).first
+                if result_loc.is_visible(timeout=600):
+                    result_loc.click(timeout=2000)
+                    result_clicked = True
+                    break
+            except Exception:
+                pass
+        if result_clicked:
+            break
+
+    if not result_clicked:
+        try:
+            page.get_by_role("button", name="Cancel", exact=False).first.click(timeout=2000)
+        except Exception:
+            pass
+        return (f"Advanced Search modal: searched for {search_term!r} in {label!r} "
+                f"but no matching result row found — modal cancelled; "
+                f"record may not exist or try a shorter search term")
+
+    # 4. Confirm the selection (Select / Done / Confirm — button label varies by SF version)
+    for confirm in ("Select", "Done", "Confirm"):
+        try:
+            dialog.get_by_role("button", name=confirm, exact=False).first.click(timeout=2000)
+            break
+        except Exception:
+            pass
+
+    time.sleep(0.5)
+    if _verify_lookup_pill(page):
+        return f"selected lookup record {search_term!r} via Advanced Search modal (pill confirmed)"
+    return (f"Advanced Search modal: clicked result for {search_term!r} in {label!r} — "
+            f"pill not yet confirmed; verify field before saving")
+
+
+def _validate_ref(ref: str, grounding) -> str | None:
+    """Return an error observation string if ref is invalid, else None.
+
+    Guards against three failure modes that produce silent Playwright timeouts:
+      1. '#'-prefixed raw DOM ids (e.g. '#1370') — Claude occasionally emits these
+         when it confuses element IDs with agent refs.
+      2. Invented refs not present in the current ELEMENTS list.
+      3. Stale refs from a prior observation (the page changed, ref numbering shifted).
+    """
+    if ref.startswith("#"):
+        return (
+            f"FAILED: '{ref}' has a '#' prefix — that is a raw DOM id, not an agent ref. "
+            f"Agent refs are the alphanumeric tokens from ELEMENTS (e.g. 53e1c303, fi0001). "
+            f"Pick a ref from the current ELEMENTS list or use click_text for visible text."
+        )
+    if grounding is not None:
+        known = {e.ref for e in grounding.elements}
+        if ref not in known:
+            return (
+                f"FAILED: ref '{ref}' is not in the current ELEMENTS — refs are only valid "
+                f"for the observation they came from. Do not invent or reuse stale refs. "
+                f"Pick a ref from ELEMENTS or use click_text for visible text."
+            )
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -957,6 +1524,9 @@ def _execute_action(page: Page, kind: str, action: dict, grounding) -> str:
     what happened (fed back into the next turn's trajectory)."""
     if kind == "click":
         ref = str(action["ref"])
+        _ref_err = _validate_ref(ref, grounding)
+        if _ref_err:
+            return _ref_err
         _find_locator(page, ref).click(timeout=2500)
         # After any click, wait for LWC dropdowns/menus to hydrate their items
         # before the next OBSERVE screenshot — prevents the "empty panel" loop.
@@ -998,14 +1568,34 @@ def _execute_action(page: Page, kind: str, action: dict, grounding) -> str:
         if text and _lookup_pill_has_value(page, text):
             return f"{label!r} already shows {text!r} as a selected pill — already set, no action needed"
 
+        # Early modal check: if an Advanced Search modal is already open from a prior
+        # lookup attempt, handle it first — the underlying form is blocked while it is open.
+        if text:
+            try:
+                if page.locator('[role="dialog"]').is_visible(timeout=200):
+                    _early_modal = _handle_advanced_search_modal(page, text, label)
+                    if _early_modal is not None:
+                        return _early_modal
+            except Exception:
+                pass
+
         # --- textbox path (text inputs, date fields, textareas, and lookup inputs) ---
-        # After a successful fill, poll briefly: if a results dropdown appeared this
-        # is a lookup field and we must click the matching option to create the pill.
+        # After a successful fill, poll briefly for an inline dropdown.  If one
+        # appears this is a lookup field and we must click the option to create
+        # the pill — a bare fill is not enough.
+        # IMPORTANT: if no dropdown appears AND the element is inside a lookup/
+        # combobox container, do NOT return "filled" — synthetic fill cannot
+        # trigger SOQL; fall through to Path C which uses real keyboard events.
+        _lookup_skip = False
         for exact in (True, False):
+            if _lookup_skip:
+                break
             for loc in (
                 page.get_by_label(label, exact=exact),
                 page.get_by_role("textbox", name=label, exact=exact),
             ):
+                if _lookup_skip:
+                    break
                 try:
                     loc.first.fill(text, timeout=3000)
                     # Verify the field accepted the value (rejects silently cleared fields).
@@ -1018,17 +1608,43 @@ def _execute_action(page: Page, kind: str, action: dict, grounding) -> str:
                                 continue  # fill silently failed; try next locator
                         except Exception:
                             pass
-                    # Lookup detection: if a dropdown appeared after the fill, click the
-                    # matching option to create the pill — a bare fill is not enough.
+                    # Poll briefly for an inline dropdown (indicates lookup field).
                     post_fill_opt = _poll_for_option(page, text, deadline_s=1.5)
                     if post_fill_opt is not None:
                         post_fill_opt.click(timeout=2000)
                         time.sleep(0.5)
                         if _verify_lookup_pill(page):
                             return f"selected lookup record {text!r} for {label!r} (pill confirmed)"
-                        # Option was clicked but pill uncertain — still report success
-                        # (pill check may miss some SF LWC variants) and let agent verify visually.
                         return f"filled {label!r} with {text!r} and selected from dropdown"
+                    # No dropdown appeared after synthetic fill.
+                    # Check if the element is nested inside a Salesforce lookup /
+                    # combobox container — if so, synthetic fill cannot trigger SOQL
+                    # and leaving raw text here will cause a "select an option" save
+                    # error.  Signal to fall through to the combobox / Path C path
+                    # that uses real keyboard events to fire the SOQL search.
+                    try:
+                        _in_lookup = loc.first.evaluate("""
+                            el => {
+                                let node = el;
+                                while (node && node !== document.body) {
+                                    const role = (node.getAttribute &&
+                                                  node.getAttribute('role')) || '';
+                                    if (role === 'combobox') return true;
+                                    const tag = (node.tagName || '').toLowerCase();
+                                    if (tag === 'lightning-lookup' ||
+                                        tag === 'force-lookup' ||
+                                        tag === 'lightning-base-combobox' ||
+                                        tag === 'lightning-grouped-combobox') return true;
+                                    node = node.parentElement || node.parentNode;
+                                }
+                                return false;
+                            }
+                        """)
+                        if _in_lookup:
+                            _lookup_skip = True
+                            break  # fall through to combobox / Path C
+                    except Exception:
+                        pass
                     return f"filled {label!r} with {text!r}"
                 except Exception:
                     pass
@@ -1068,24 +1684,38 @@ def _execute_action(page: Page, kind: str, action: dict, grounding) -> str:
                     pass
 
                 # Path C: record-lookup — real keyboard events (keydown/keyup) to fire
-                # the async SOQL search. combo.fill() sends a synthetic event that SF
-                # lookup components may ignore; keyboard.type() dispatches the real thing.
+                # the async SOQL search. combo.fill() sends synthetic events that SF
+                # lookup components may ignore; keyboard.type() dispatches real ones.
+                # CLEAR using Control+a + Delete (real keyboard events, not synthetic
+                # .fill("") which can disturb SF's LWC state and suppress SOQL).
                 try:
                     try:
-                        combo.locator("input").first.click(timeout=1500)
-                        combo.locator("input").first.triple_click(timeout=1000)
+                        inner = combo.locator("input").first
+                        inner.click(timeout=1500)
                     except Exception:
-                        combo.click(timeout=2000)
-                    page.keyboard.type(text, delay=60)   # char-by-char → SOQL search fires
-                    option_loc = _poll_for_option(page, text, deadline_s=4.0)
+                        try:
+                            combo.click(timeout=2000)
+                        except Exception:
+                            pass
+                    page.keyboard.press("Control+a")   # select all existing text
+                    page.keyboard.press("Delete")       # delete it (real key events)
+                    time.sleep(0.1)
+                    page.keyboard.type(text, delay=60)  # char-by-char → SOQL fires
+                    # Poll within the combobox scope first to avoid picking up
+                    # global-search suggestions or other page-level options.
+                    option_loc = _poll_for_inline_option(page, combo, text, deadline_s=5.0)
                     if option_loc is None:
+                        # Salesforce may open an Advanced Search modal after inline timeout
+                        _adv = _handle_advanced_search_modal(page, text, label)
+                        if _adv is not None:
+                            return _adv
                         return (
                             f"typed {text!r} into lookup field {label!r} but no search "
-                            f"results appeared after 4s — record may not exist or "
+                            f"results appeared after 5s — record may not exist or "
                             f"spelling is wrong; do NOT use global search as a substitute"
                         )
                     option_loc.click(timeout=2000)
-                    time.sleep(0.5)
+                    time.sleep(0.6)
                     if _verify_lookup_pill(page):
                         return f"selected lookup record {text!r} in {label!r} (pill confirmed)"
                     return (
@@ -1104,6 +1734,9 @@ def _execute_action(page: Page, kind: str, action: dict, grounding) -> str:
 
     if kind == "fill":
         ref = str(action["ref"])
+        _ref_err = _validate_ref(ref, grounding)
+        if _ref_err:
+            return _ref_err
         text = str(action.get("text", ""))
         loc = _find_locator(page, ref)
         # Guard: block the page-level global search bar — typing into it navigates
@@ -1181,6 +1814,13 @@ def _execute_action(page: Page, kind: str, action: dict, grounding) -> str:
 
     if kind == "dismiss_obstruction":
         ref = str(action["ref"])
+        # '#'-prefixed refs are invalid but don't need full ELEMENTS check here —
+        # dismiss_obstruction is often called on elements that may not be grounded.
+        if ref.startswith("#"):
+            return (
+                f"FAILED: '{ref}' has a '#' prefix — not a valid agent ref. "
+                f"Pick the ref of the modal's close button from ELEMENTS."
+            )
         loc = _find_locator(page, ref)
 
         def _still_blocking() -> bool:

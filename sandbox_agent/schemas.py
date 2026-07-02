@@ -25,6 +25,7 @@ class StepKind(str, Enum):
     LOOP = "loop"
     HUMAN_INPUT = "human_input"
     NOTIFY = "notify"
+    SEQUENCE = "sequence"
 
 
 class Step(BaseModel):
@@ -32,6 +33,9 @@ class Step(BaseModel):
     kind: StepKind
     description: str
     details: dict[str, Any] = Field(default_factory=dict)
+    # Plain-English end-state checked before acting (idempotency) and after (verify).
+    # None for non-state-changing steps (navigate, wait, extract, control-flow).
+    success_condition: str | None = None
     on_failure: str = "pause"
 
 
@@ -44,6 +48,7 @@ class Plan(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     id: str
+    version: int = 1
     goal: str
     summary: str | None = None
     steps: list[Step] = Field(default_factory=list)
