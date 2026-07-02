@@ -141,9 +141,12 @@ def parse_action(text: str) -> dict | None:
         if lines and lines[-1].strip().startswith("```"):
             lines = lines[:-1]
         t = "\n".join(lines).strip()
-    # Fast path: well-formed JSON.
+    # Fast path: well-formed JSON dict.
     try:
-        return json.loads(t)
+        parsed = json.loads(t)
+        if isinstance(parsed, dict):
+            return parsed
+        # JSON parsed but not a dict (e.g. a list) — fall through to { } extraction
     except json.JSONDecodeError:
         pass
     # Extract the outermost {...} block (handles prose wrapping the JSON).
