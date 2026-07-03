@@ -1638,7 +1638,6 @@ def _seq_click_dropdown_result(page: "Page", text: str) -> str:
             opt = _find_inline_dropdown_option(
                 root, text, exclude_global_search=exclude_global
             )
-<<<<<<< HEAD
         try:
             opt.click(timeout=2000)
         except Exception:
@@ -1657,7 +1656,6 @@ def _seq_click_dropdown_result(page: "Page", text: str) -> str:
                 return f"clicked inline dropdown result {text!r} — pill confirmed{suffix}"
             time.sleep(0.25)
         # No pill after 3 s — loop once more: re-locate and re-click.
-=======
             if opt is None:
                 if attempt == 1:
                     time.sleep(0.4)
@@ -1700,7 +1698,6 @@ def _seq_click_dropdown_result(page: "Page", text: str) -> str:
         # here, but guard against falling through):
         _last_fail = _last_fail or f"match+click exhausted without pill for {text!r}"
 
->>>>>>> f834fdd (_seq_click_dropdown_result — outer retry loop (3 attempts))
     return (
         f"FAILED: {_last_fail} — re-run fill_field and retry"
         if _last_fail else
