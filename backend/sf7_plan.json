@@ -225,7 +225,7 @@
         "target_description": "Call task assigned to Shrey Sharma in the Open Activities or Activity section of the Related tab"
       },
       "success_condition": "A task with Subject 'Call' assigned to 'Shrey Sharma' is visible in the Open Activities section of the Related tab on this case",
-      "on_failure": "continue"
+      "on_failure": "skip"
     },
     {
       "id": "step_021",
