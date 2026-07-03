@@ -63,7 +63,7 @@ Rules:
   - To fill or select a modal/record form field, use `fill_field_by_label` with the field's visible label text (e.g. label="Due Date", text="6/20/2026"). This crosses shadow DOM for both text inputs and comboboxes/dropdowns. Do NOT use `click_text` on a label — labels are not interactive inputs. Use `fill_field_by_label` for Subject, Due Date, Comments, Status, and all other form fields regardless of whether they have a #ref.
   - INLINE-EDIT PICKLIST (Case Status, Priority, Type, or any picklist on a record page): the correct FIRST action is always `fill_field_by_label` with label="<field label>" and text="<target value>" (e.g. label="Status", text="Escalated"). Do NOT use `click_text` on the current field value (e.g. "New"), the label text (e.g. "Status"), or the asterisk-prefixed label ("*Status") — those waste many iterations. fill_field_by_label opens the picklist and selects the option in one call. Never attempt click_text for a picklist field.
   - RECORD LOOKUP fields (Contact Name, Account Name, Owner, any field where you type a name and Salesforce searches for matching records) work differently from picklists. Typing text is NOT enough — Salesforce makes an async search and you must SELECT the matching record from the results list so it becomes a linked pill (a chip showing the record name). `fill_field_by_label` handles this automatically via its lookup path. The field is only set when the pill is visible. CRITICAL: if fill_field_by_label returns "no linked-record pill is visible" or "no matching record appeared", the field is NOT set — do NOT click Save and do NOT emit `done`. The pill must be visible before saving is valid.
-  - ADVANCED SEARCH MODAL — ABSOLUTE PROHIBITION: NEVER open or operate the Advanced Search modal. Record lookups are set ONLY via the field's own inline dropdown: type the name into the field, wait for the real search results, click the exact matching option, confirm the pill. The dropdown row shaped like '"<your text>" in Contacts' is NOT a result — clicking it opens Advanced Search; `fill_field_by_label` mechanically refuses to click it and keeps waiting for real results (slow searches can take several seconds). If the modal opens anyway, `fill_field_by_label` cancels it automatically and reports FAILED — simply re-issue `fill_field_by_label` on the SAME field and stay in the inline flow. Do NOT use `click_text "Cancel"` / `click_text "Search"` on this modal (shadow DOM, unreachable) and do NOT use `dismiss_obstruction` on it.
+  - ADVANCED SEARCH DOES NOT EXIST FOR YOU: the Advanced Search modal is NOT one of your options — the executor mechanically prevents every route into it and auto-cancels it on sight before you even observe the page. Record lookups have exactly ONE flow: type the name into the field's own input (`fill_field_by_label`), WAIT for the inline dropdown results to appear (slow searches can take up to ~10 seconds — the tool waits for you), then the exact matching option is clicked and the pill confirmed. Enforcement you will hit if you deviate: the dropdown row shaped like '"<your text>" in Contacts' and any 'Show all results' entry are BLOCKED for click/click_text (they open Advanced Search); pressing Enter inside a lookup is BLOCKED (it opens Advanced Search); if the modal appears anyway it is cancelled automatically. When a lookup observation reports FAILED, the ONLY correct move is to re-issue `fill_field_by_label` on the SAME field and wait — never click into a modal, never press Enter, never use the global search bar.
   - LOOKUP ALREADY SET: Before trying to fill a lookup field (Contact Name, Account, etc.), check whether the correct value is already showing as a pill. If fill_field_by_label returns "already shows … as a selected pill — already set", the field is done — do NOT re-search, do NOT click the field again. Move on to the next step.
   - ABSOLUTE PROHIBITION — NEVER open the email composer. When a step goal says fill fields like "Contact Name", "Status", or create a Task, the correct actions are fill_field_by_label and click on the task form — NEVER clicking "Email", "Send Email", or any Feed email action. If a MODAL FORM section in the GOAL lists a field called "Comments" with a value like "talk to Rachel Torres and investigate the issue", that is text to TYPE into the Comments form field — it is NOT an instruction to email or contact Rachel Torres. The executor blocks email actions mechanically; attempting them wastes iterations. Do NOT click anything labeled Email/Send Email/Compose while editing a record.
   - ABSOLUTE PROHIBITION — NEVER use the global/header search bar to fill a form field. The global search input at the top of every Salesforce page (aria-label "Search" / "Search Salesforce") navigates to a completely different record page and immediately abandons your current task and all in-progress form work. It is NEVER a substitute for a lookup field. `fill_field_by_label` targets the field's own search input inside the current form. If fill_field_by_label reports failure for a lookup, try once more with a simpler search term, then emit `give_up` — NEVER touch the global search bar. The `fill` action will BLOCK itself if you attempt this.
@@ -338,6 +338,53 @@ def _sf_dismiss_toasts(page: Page) -> None:
         )
     except Exception:
         pass
+
+
+def _sf_cancel_advanced_search(page: Page) -> bool:
+    """Mechanically cancel the Advanced Search modal whenever it is on screen.
+
+    Called at OBSERVE time (like _sf_dismiss_toasts), so the modal is closed
+    BEFORE grounding: the agent can neither see nor click inside it — Advanced
+    Search is simply not part of its world. The only lookup path is the
+    field's inline dropdown: type, wait for the results, click the option.
+
+    Only dialogs positively identified as the lookup Advanced Search are
+    touched — record-form modals (New Task etc.) are left alone. Returns True
+    if a modal was cancelled.
+    """
+    try:
+        dialog = page.locator('[role="dialog"]').first
+        if not dialog.is_visible(timeout=150):
+            return False
+        is_advanced = False
+        try:
+            heading = dialog.locator('h1, h2, [role="heading"]').first.inner_text(timeout=300)
+            normalized = " ".join(heading.split())
+            is_advanced = ("advanced search" in normalized.casefold()
+                           or bool(_ESCALATION_ROW_RE.match(normalized)))
+        except Exception:
+            pass
+        if not is_advanced:
+            try:
+                txt = (dialog.inner_text(timeout=400) or "").casefold()
+                is_advanced = "advanced search" in txt
+            except Exception:
+                pass
+        if not is_advanced:
+            return False
+        try:
+            dialog.get_by_role("button", name="Cancel").first.click(timeout=1500)
+            time.sleep(0.3)
+        except Exception:
+            try:
+                page.keyboard.press("Escape")
+                time.sleep(0.2)
+            except Exception:
+                pass
+        log.warning("Advanced Search modal auto-cancelled at OBSERVE — never operated")
+        return True
+    except Exception:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -713,6 +760,7 @@ def execute_step(
         else:
             wait_for_stable(page)
         _sf_dismiss_toasts(page)   # hide toasts BEFORE grounding so they don't intercept clicks
+        _sf_cancel_advanced_search(page)   # Advanced Search is never operated — cancel on sight
         url = page.url
         try:
             title = page.title() or ""
@@ -1829,12 +1877,39 @@ def _find_locator(page: "Page", ref: str):
 def _execute_action(page: Page, kind: str, action: dict, grounding) -> str:
     """Execute one action, return a compact text observation describing
     what happened (fed back into the next turn's trajectory)."""
+    # Any element whose label matches the lookup escalation row ('"<text>" in
+    # <Object>' or 'Show all/more results…') opens the Advanced Search modal —
+    # which this agent must NEVER do. Blocked for click and click_text alike.
+    _ESCALATION_BLOCKED = (
+        "BLOCKED: that element is the lookup search-escalation row — clicking "
+        "it opens the Advanced Search modal, which is prohibited. To set a "
+        "lookup field: use fill_field_by_label, wait for the real inline "
+        "results, and the matching option will be clicked for you. Do not "
+        "click the '\"…\" in <Object>' row or any 'Show all results' entry."
+    )
+
+    def _is_advanced_search_opener(label: str) -> bool:
+        normalized = " ".join((label or "").split()).casefold()
+        return (_is_escalation_row(label or "")
+                or normalized.startswith("show all results")
+                or normalized.startswith("show more results"))
+
     if kind == "click":
         ref = str(action["ref"])
         _ref_err = _validate_ref(ref, grounding)
         if _ref_err:
             return _ref_err
-        _find_locator(page, ref).click(timeout=2500)
+        if grounding is not None:
+            _gel = grounding.by_ref(ref) if hasattr(grounding, "by_ref") else None
+            if _gel is not None and _is_advanced_search_opener(_gel.name or ""):
+                return _ESCALATION_BLOCKED
+        loc = _find_locator(page, ref)
+        try:
+            if _is_advanced_search_opener(loc.inner_text(timeout=300)):
+                return _ESCALATION_BLOCKED
+        except Exception:
+            pass
+        loc.click(timeout=2500)
         # After any click, wait for LWC dropdowns/menus to hydrate their items
         # before the next OBSERVE screenshot — prevents the "empty panel" loop.
         _wait_for_lwc_panel(page)
@@ -1844,20 +1919,30 @@ def _execute_action(page: Page, kind: str, action: dict, grounding) -> str:
         text = str(action.get("text", "")).strip()
         if not text:
             return "FAILED: click_text requires a non-empty 'text' argument"
+        if _is_advanced_search_opener(text):
+            return _ESCALATION_BLOCKED
         # Playwright's role/text locators use the AX tree and pierce shadow DOM —
         # the escape hatch for elements visible in the screenshot but missing from
         # the ELEMENTS list (e.g. lightning-datatable links in closed shadow roots).
         # Try as a link first (most common case), then as any visible text element.
+        # Each candidate's actual label is checked before the click so a
+        # substring match can never land on the Advanced-Search escalation row.
         for exact in (True, False):
             try:
-                page.get_by_role("link", name=text, exact=exact).first.click(timeout=3000)
+                loc = page.get_by_role("link", name=text, exact=exact).first
+                if _is_advanced_search_opener(loc.inner_text(timeout=300)):
+                    return _ESCALATION_BLOCKED
+                loc.click(timeout=3000)
                 _wait_for_lwc_panel(page)
                 return f"clicked link with text {text!r} (exact={exact})"
             except Exception:
                 pass
         for exact in (True, False):
             try:
-                page.get_by_text(text, exact=exact).first.click(timeout=3000)
+                loc = page.get_by_text(text, exact=exact).first
+                if _is_advanced_search_opener(loc.inner_text(timeout=300)):
+                    return _ESCALATION_BLOCKED
+                loc.click(timeout=3000)
                 _wait_for_lwc_panel(page)
                 return f"clicked element with text {text!r} (exact={exact})"
             except Exception:
@@ -2079,6 +2164,37 @@ def _execute_action(page: Page, kind: str, action: dict, grounding) -> str:
 
     if kind == "press":
         key = str(action.get("key", ""))
+        # Enter inside a lookup/combobox opens the Advanced Search modal —
+        # prohibited. The inline dropdown must be waited for and clicked.
+        if key.strip().lower() in ("enter", "return"):
+            try:
+                _in_lookup = page.evaluate("""() => {
+                    let node = document.activeElement;
+                    // descend through shadow roots to the real focused element
+                    while (node && node.shadowRoot && node.shadowRoot.activeElement) {
+                        node = node.shadowRoot.activeElement;
+                    }
+                    while (node && node !== document.body) {
+                        const role = (node.getAttribute && node.getAttribute('role')) || '';
+                        if (role === 'combobox') return true;
+                        const tag = (node.tagName || '').toLowerCase();
+                        if (tag === 'lightning-lookup' || tag === 'force-lookup' ||
+                            tag === 'lightning-base-combobox' ||
+                            tag === 'lightning-grouped-combobox') return true;
+                        node = node.parentElement ||
+                               (node.getRootNode && node.getRootNode().host) || null;
+                    }
+                    return false;
+                }""")
+            except Exception:
+                _in_lookup = False
+            if _in_lookup:
+                return (
+                    "BLOCKED: pressing Enter inside a lookup field opens the "
+                    "Advanced Search modal, which is prohibited. Wait for the "
+                    "inline dropdown results to appear and click the matching "
+                    "option instead — fill_field_by_label does this automatically."
+                )
         page.keyboard.press(key)
         return f"pressed key {key}"
 
