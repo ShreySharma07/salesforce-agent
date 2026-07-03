@@ -1,10 +1,10 @@
 {
   "id": "plan_ac3759ca42",
   "automation_id": null,
-  "version": 6,
+  "version": 7,
   "status": "approved",
-  "goal": "Automatically process new Acme cases by updating the contact name, escalating the status, and creating a follow-up task assigned to Shrey Sharma.",
-  "summary": "This plan automates the daily triage of new cases for the Acme account. It navigates to the Acme Cases list view and drains it: for each case it extracts the contact name, sets the Contact Name field, escalates Status to Escalated, and creates a Call task. Every state-changing step carries a success_condition so it self-skips if the target state is already present, making each iteration idempotent for any partial-completion state.",
+  "goal": "Automatically process new Acme cases by updating the contact name, escalating the status, and creating a follow-up Call task assigned to Shrey Sharma with a comment.",
+  "summary": "This plan automates the daily triage of new cases for the Acme account. It navigates to the Acme Cases list view and drains it: for each case it extracts the contact name, sets the Contact Name field, escalates Status to Escalated, then creates a Call task with every field filled explicitly (Subject, Assigned To = Shrey Sharma, Due Date, Comments, Status) and saves it. Task creation is broken into one step per field so no field is silently skipped and the Assigned To lookup is never left on its default owner. Every state-changing step carries a success_condition so it self-skips if the target state is already present, making each iteration idempotent for any partial-completion state.",
   "steps": [
     {
       "id": "step_001",
@@ -42,7 +42,14 @@
           "step_012",
           "step_013",
           "step_014",
-          "step_015"
+          "step_015",
+          "step_016",
+          "step_017",
+          "step_018",
+          "step_019",
+          "step_020",
+          "step_021",
+          "step_022"
         ]
       },
       "on_failure": "pause"
@@ -70,7 +77,7 @@
     {
       "id": "step_008",
       "kind": "sequence",
-      "description": "Set Contact Name via inline pencil edit — click pencil, type, wait for inline dropdown, click result to create pill",
+      "description": "Set Contact Name via inline pencil edit -- click pencil, type, wait for inline dropdown, click result to create pill",
       "details": {
         "steps": [
           {"kind": "click_pencil_icon", "target": "Contact Name"},
@@ -89,7 +96,7 @@
         "intent": "click",
         "target_description": "Save button on the Case Details inline-edit footer"
       },
-      "success_condition": "The Contact Name field shows '${contact_name}' as a linked-record pill in read-only view — the saved value is visible, not merely that the Save/Cancel footer is gone",
+      "success_condition": "The Contact Name field shows '${contact_name}' as a linked-record pill in read-only view -- the saved value is visible, not merely that the Save/Cancel footer is gone",
       "on_failure": "pause"
     },
     {
@@ -113,7 +120,7 @@
         "intent": "click",
         "target_description": "Save button on the Case Details inline-edit footer"
       },
-      "success_condition": "The Status field shows 'Escalated' in read-only view — the saved value is visible, not merely that the Save/Cancel footer is gone",
+      "success_condition": "The Status field shows 'Escalated' in read-only view -- the saved value is visible, not merely that the Save/Cancel footer is gone",
       "on_failure": "pause"
     },
     {
@@ -130,23 +137,98 @@
     {
       "id": "step_013",
       "kind": "ui_action",
-      "description": "Create a Call task assigned to Shrey Sharma with all required fields",
+      "description": "Click the New Task button in the Open Activities section to open the New Task modal",
       "details": {
-        "intent": "create_task",
-        "target_description": "New Task button in the Open Activities section, then fill and save the New Task modal",
-        "fields": {
-          "Subject": "Call",
-          "Assigned To": "Shrey Sharma",
-          "Due Date": "today's date",
-          "Comments": "talk to ${contact_name} and investigate the issue",
-          "Status": "In Progress"
-        }
+        "intent": "click",
+        "target_description": "New Task button in the Open Activities section of the Related tab"
       },
-      "success_condition": "A task with Subject 'Call' assigned to 'Shrey Sharma' is visible in the Open Activities section of the Related tab on this case",
+      "success_condition": "The New Task modal is open and its form fields (Subject, Assigned To, Due Date, Comments, Status) are visible",
       "on_failure": "pause"
     },
     {
       "id": "step_014",
+      "kind": "ui_action",
+      "description": "Fill the Subject field with 'Call' in the New Task modal",
+      "details": {
+        "intent": "fill",
+        "target_description": "Subject field in the New Task modal",
+        "value": "Call"
+      },
+      "success_condition": "The Subject field in the New Task modal contains 'Call'",
+      "on_failure": "pause"
+    },
+    {
+      "id": "step_015",
+      "kind": "ui_action",
+      "description": "Set the Assigned To lookup to Shrey Sharma. The field defaults to the current user (Sumit Paliwal) -- if a different name is already selected, first clear it (click the X on the existing pill), then type 'Shrey Sharma', wait for the inline dropdown, and click the matching record so it becomes a linked pill. Do NOT leave the default owner.",
+      "details": {
+        "intent": "fill",
+        "target_description": "Assigned To lookup field in the New Task modal",
+        "value": "Shrey Sharma"
+      },
+      "success_condition": "The Assigned To field in the New Task modal shows 'Shrey Sharma' as the selected record -- NOT the default owner (Sumit Paliwal) and not empty",
+      "on_failure": "pause"
+    },
+    {
+      "id": "step_016",
+      "kind": "ui_action",
+      "description": "Fill the Due Date field with today's date in the New Task modal",
+      "details": {
+        "intent": "fill",
+        "target_description": "Due Date field in the New Task modal",
+        "value": "today's date"
+      },
+      "success_condition": "The Due Date field in the New Task modal contains today's date",
+      "on_failure": "pause"
+    },
+    {
+      "id": "step_017",
+      "kind": "ui_action",
+      "description": "Fill the Comments text area in the New Task modal",
+      "details": {
+        "intent": "fill",
+        "target_description": "Comments text area in the New Task modal",
+        "value": "talk to ${contact_name} and investigate the issue"
+      },
+      "success_condition": "The Comments text area in the New Task modal contains the text 'talk to ${contact_name} and investigate the issue'",
+      "on_failure": "pause"
+    },
+    {
+      "id": "step_018",
+      "kind": "ui_action",
+      "description": "Set the Task Status picklist to 'In Progress' in the New Task modal",
+      "details": {
+        "intent": "fill",
+        "target_description": "Status picklist in the New Task modal",
+        "value": "In Progress"
+      },
+      "success_condition": "The Status picklist in the New Task modal shows 'In Progress'",
+      "on_failure": "pause"
+    },
+    {
+      "id": "step_019",
+      "kind": "ui_action",
+      "description": "Save the new Call task",
+      "details": {
+        "intent": "click",
+        "target_description": "Save button in the New Task modal footer"
+      },
+      "success_condition": "The New Task modal has closed and the task was saved (no validation errors are shown)",
+      "on_failure": "pause"
+    },
+    {
+      "id": "step_020",
+      "kind": "ui_action",
+      "description": "Verify the Call task appears assigned to Shrey Sharma",
+      "details": {
+        "intent": "verify",
+        "target_description": "Call task assigned to Shrey Sharma in the Open Activities or Activity section of the Related tab"
+      },
+      "success_condition": "A task with Subject 'Call' assigned to 'Shrey Sharma' is visible in the Open Activities section of the Related tab on this case",
+      "on_failure": "continue"
+    },
+    {
+      "id": "step_021",
       "kind": "wait",
       "description": "Wait for the task creation to complete",
       "details": {
@@ -156,9 +238,9 @@
       "on_failure": "pause"
     },
     {
-      "id": "step_015",
+      "id": "step_022",
       "kind": "navigate",
-      "description": "Navigate back to the Acme Cases list view",
+      "description": "Navigate back to the Acme Cases list view to process the next New case",
       "details": {
         "url": "https://sumitpaliw-250428-644-demo.lightning.force.com/lightning/o/Case/list?filterName=Acme_Cases",
         "expected_title_contains": "Acme Cases"
@@ -174,6 +256,10 @@
     {
       "rule": "Each processing step self-skips if its target state is already present, making the plan idempotent for any partial-completion state.",
       "inferred_from": "Per-step success_conditions checked before acting; the drain loop's backstop pauses if the same record is served twice."
+    },
+    {
+      "rule": "The follow-up task must be assigned to Shrey Sharma, not the default record owner, and must include the Comments note.",
+      "inferred_from": "Prior run created the task but left it assigned to Sumit Paliwal and skipped the Comments field; task creation is now one explicit step per field."
     }
   ],
   "required_credentials": [
@@ -189,5 +275,5 @@
   "created_by": null,
   "approved_at": null,
   "approved_by": null,
-  "correction_history": ["Replaced coarse has_Call_task extract+decision with per-step success_conditions for full idempotency across all partial states. Merged New Task click + form fill into one create_task step. Added drain backstop for stuck-loop detection."]
+  "correction_history": ["Replaced coarse has_Call_task extract+decision with per-step success_conditions for full idempotency across all partial states. Merged New Task click + form fill into one create_task step. Added drain backstop for stuck-loop detection.", "Expanded the single create_task step into explicit per-field steps (New Task click, Subject, Assigned To, Due Date, Comments, Status, Save, Verify) because the collapsed step left Assigned To on its default owner (Sumit Paliwal), skipped Comments, and did not reliably save. Each field now has its own success_condition."]
 }
