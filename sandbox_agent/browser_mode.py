@@ -1554,6 +1554,7 @@ def _seq_click_dropdown_result(page: "Page", text: str) -> str:
         except Exception:
             return False
 
+<<<<<<< HEAD
     # --- STABILIZE: never click the transient recent-items panel. ----------
     # On focus, SF lookups instantly show a recent-items panel (which can
     # contain the target name from prior runs), then replace it with async
@@ -1585,6 +1586,8 @@ def _seq_click_dropdown_result(page: "Page", text: str) -> str:
             )
         # Cap hit while real candidates exist but the list was still churning —
         # proceed best-effort; the fresh re-location below minimizes staleness.
+=======
+>>>>>>> f834fdd (_seq_click_dropdown_result — outer retry loop (3 attempts))
     # --- OUTER RETRY LOOP (up to 3 total attempts) --------------------------
     # When the Advanced Search modal opens, or when the settled dropdown has
     # no matching option, we cancel the modal, retype the search term to fire
