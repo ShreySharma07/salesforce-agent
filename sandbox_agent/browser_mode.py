@@ -1237,6 +1237,54 @@ def _seq_advanced_search_guard(page: "Page", sub_action: str) -> str | None:
     )
 
 
+def _seq_cancel_adv_modal_if_open(page: "Page") -> bool:
+    """Cancel Advanced Search / any dialog if open. Returns True if one was found."""
+    try:
+        if not page.locator('[role="dialog"]').first.is_visible(timeout=150):
+            return False
+    except Exception:
+        return False
+    for btn_name in ("Cancel", "Close"):
+        try:
+            page.get_by_role("button", name=btn_name).first.click(timeout=1500)
+            time.sleep(0.35)
+            return True
+        except Exception:
+            pass
+    try:
+        page.keyboard.press("Escape")
+        time.sleep(0.35)
+    except Exception:
+        pass
+    return True
+
+
+def _seq_retype_for_soql(page: "Page", text: str) -> None:
+    """Re-focus the lookup input from _LAST_SEQ_FILL and retype *text*.
+
+    Called after cancelling the Advanced Search modal so a fresh SOQL
+    query fires against the inline dropdown (not the modal).
+    """
+    time.sleep(0.3)
+    label = _LAST_SEQ_FILL.get("label")
+    if label:
+        for exact in (True, False):
+            try:
+                inner = (
+                    page.get_by_role("combobox", name=label, exact=exact)
+                    .first.locator("input").first
+                )
+                if inner.is_visible(timeout=700):
+                    inner.click(timeout=1000)
+                    break
+            except Exception:
+                pass
+    page.keyboard.press("Control+a")
+    page.keyboard.press("Delete")
+    time.sleep(0.15)
+    page.keyboard.type(text, delay=60)
+
+
 def _locate_field_edit_input(page: "Page", label: str, *, timeout_ms: int = 400):
     """Positively locate a field's edit input by role+name matching *label*.
 
@@ -1537,25 +1585,60 @@ def _seq_click_dropdown_result(page: "Page", text: str) -> str:
             )
         # Cap hit while real candidates exist but the list was still churning —
         # proceed best-effort; the fresh re-location below minimizes staleness.
+    # --- OUTER RETRY LOOP (up to 3 total attempts) --------------------------
+    # When the Advanced Search modal opens, or when the settled dropdown has
+    # no matching option, we cancel the modal, retype the search term to fire
+    # a fresh SOQL query, and retry the full stabilize+match cycle.  This
+    # keeps the sequence entirely on the inline path — never escalates to
+    # Advanced Search.
+    _last_fail = ""
+    for _outer in range(3):
+        if _outer > 0:
+            _seq_retype_for_soql(page, text)
 
-    # --- MATCH + CLICK, with ONE retry if no pill forms. --------------------
-    for attempt in (1, 2):
-        _modal = _seq_advanced_search_guard(page, "click_dropdown_result")
-        if _modal is not None:
-            return _modal
-        # Re-locate the option FRESH immediately before clicking — never
-        # click a locator captured in an earlier poll cycle: the listbox may
-        # have re-rendered and the old node be detached.
-        root, exclude_global = _current_search_root()
-        opt = _find_inline_dropdown_option(root, text, exclude_global_search=exclude_global)
-        if opt is None:
-            if attempt == 1:
-                time.sleep(0.4)
-                continue
-            return (
-                f"FAILED: settled dropdown has no option matching {text!r} "
-                f"(escalation row excluded) — re-run fill_field and retry"
+        # --- STABILIZE: wait for the dropdown to settle with real results. --
+        # SF shows a recent-items panel on focus, then replaces it with SOQL
+        # results. And while SOQL is in flight, only the escalation row may
+        # appear — treat that as a loading state, not a settled result.
+        # Hard cap ~10 s (observed SOQL latency > 4.7 s on slow orgs).
+        stabilize_deadline = time.time() + 10.0
+        prev_labels: list[str] | None = None
+        _need_retype = False
+        while time.time() < stabilize_deadline:
+            if _seq_cancel_adv_modal_if_open(page):
+                _need_retype = True
+                break
+            labels = _visible_option_labels()
+            if (_has_real_candidate(labels) and labels == prev_labels
+                    and not _listbox_loading()):
+                break  # settled
+            prev_labels = labels
+            time.sleep(0.3)
+        else:
+            # 10 s cap hit
+            if not _has_real_candidate(prev_labels or []):
+                _last_fail = (
+                    f"no real result option appeared within 10 s (only the "
+                    f"escalation row) — SOQL returned nothing or is too slow"
+                )
+                _need_retype = True
+            # else: real candidates present but still churning — proceed best-effort
+
+        if _need_retype:
+            continue
+
+        # --- MATCH + CLICK, with ONE inner re-locate retry. -----------------
+        for attempt in (1, 2):
+            if _seq_cancel_adv_modal_if_open(page):
+                _need_retype = True
+                break
+            # Re-locate FRESH before each click — never use a stale locator
+            # from an earlier poll cycle; the listbox may have re-rendered.
+            root, exclude_global = _current_search_root()
+            opt = _find_inline_dropdown_option(
+                root, text, exclude_global_search=exclude_global
             )
+<<<<<<< HEAD
         try:
             opt.click(timeout=2000)
         except Exception:
@@ -1574,9 +1657,54 @@ def _seq_click_dropdown_result(page: "Page", text: str) -> str:
                 return f"clicked inline dropdown result {text!r} — pill confirmed{suffix}"
             time.sleep(0.25)
         # No pill after 3 s — loop once more: re-locate and re-click.
+=======
+            if opt is None:
+                if attempt == 1:
+                    time.sleep(0.4)
+                    continue
+                _last_fail = (
+                    f"settled dropdown has no option matching {text!r} "
+                    f"(escalation row excluded)"
+                )
+                _need_retype = True
+                break
+            try:
+                opt.click(timeout=2000)
+            except Exception:
+                if attempt == 1:
+                    continue  # list re-rendered mid-click; re-locate and retry
+                _last_fail = f"click on dropdown result for {text!r} threw an exception"
+                _need_retype = True
+                break
+            # Pill verification: poll up to 3 s (LWC render is slower than a
+            # fixed delay), early-exit on success.
+            pill_deadline = time.time() + 3.0
+            while time.time() < pill_deadline:
+                if _verify_lookup_pill(page):
+                    suffix = " (after inner retry)" if attempt == 2 else ""
+                    outer_suffix = f" (retype attempt {_outer + 1})" if _outer > 0 else ""
+                    return (
+                        f"clicked inline dropdown result {text!r} "
+                        f"— pill confirmed{suffix}{outer_suffix}"
+                    )
+                time.sleep(0.25)
+            # No pill after 3 s — try once more with a fresh re-locate.
+            if attempt == 2:
+                _last_fail = f"clicked {text!r} but no linked-record pill appeared"
+                _need_retype = True
+                break
+
+        if _need_retype:
+            continue
+        # Inner loop completed both attempts without success (shouldn't reach
+        # here, but guard against falling through):
+        _last_fail = _last_fail or f"match+click exhausted without pill for {text!r}"
+
+>>>>>>> f834fdd (_seq_click_dropdown_result — outer retry loop (3 attempts))
     return (
-        f"FAILED: clicked dropdown result for {text!r} but no pill "
-        f"appeared — field is NOT set; clear and retry"
+        f"FAILED: {_last_fail} — re-run fill_field and retry"
+        if _last_fail else
+        f"FAILED: could not select inline result for {text!r} after 3 attempts"
     )
 
 
