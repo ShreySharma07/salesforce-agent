@@ -34,7 +34,7 @@ Plan schema (strict):
   "steps": [
     {
       "id": "step_001",
-      "kind": "<navigate|ui_action|mcp_call|extract|decision|loop|wait|human_input|notify>",
+      "kind": "<navigate|ui_action|sequence|mcp_call|extract|decision|loop|wait|human_input|notify>",
       "description": "<one-line description>",
       "details": { ...kind-specific... },
       "success_condition": "<plain-English end state this step must produce, or omit>",
@@ -50,7 +50,8 @@ Plan schema (strict):
 }
 
 success_condition rules (CRITICAL — read before generating steps):
-  - Include success_condition ONLY on ui_action steps that change state.
+  - Include success_condition on every ui_action AND every sequence step that
+    changes state (inline field edits, modal field fills, saves, tab switches).
   - Omit success_condition for: navigate, wait, extract, decision, loop, mcp_call,
     human_input, notify — these are not state-changing or are control-flow.
   - Also omit for the drain-sentinel ui_action (the first body step that clicks a
@@ -71,6 +72,14 @@ success_condition rules (CRITICAL — read before generating steps):
 Step kind details schemas:
   navigate:    {"url": "...", "expected_title_contains": "..."}
   ui_action:   {"intent": "...", "target_description": "...", "value": "..."}
+  sequence:    {"steps": [ <sub-action>, ... ]}  — an ordered list of deterministic
+               sub-actions for ONE inline record-page field edit (via its pencil
+               icon). Valid sub-action shapes:
+                 {"kind": "click_pencil_icon", "target": "<exact field label>"}
+                 {"kind": "fill_field", "label": "<exact field label>", "value": "<value>"}
+                 {"kind": "click_dropdown_result", "text": "<value>"}      (record lookup → pill)
+                 {"kind": "select_dropdown_option", "label": "<field label>", "value": "<value>"}  (picklist)
+                 {"kind": "click_save_footer"}
   mcp_call:    {"server": "...", "tool": "...", "arguments": {}}
   extract:     {"variable_name": "...", "description": "..."}
   decision:    {"condition": "...", "if_true": ["step_id"], "if_false": ["step_id"]}
@@ -98,31 +107,56 @@ Thoroughness Rules:
     of the task.
   - Keep each step's "description" to one concise line.
 
-  FIELD-CHANGE CONSOLIDATION (critical for fast, reliable execution):
-  When the recording shows the user changing a field value — whether a picklist,
-  dropdown, combobox, date picker, or text field — emit EXACTLY ONE `ui_action`
-  step for the entire field-change sequence, regardless of how many sub-clicks
-  the user performed (e.g. clicking a pencil icon, opening a dropdown, clicking
-  an option). Use:
-    kind: "ui_action"
-    details.intent: "fill_field"
-    details.field_label: "<exact visible label of the field>"
-    details.value: "<the value to set>"
-  Do NOT decompose a field change into separate "click edit icon", "click
-  dropdown", "select option" steps. The executor's fill_field_by_label action
-  handles the entire sequence atomically.
+  GRANULARITY — CAPTURE EVERY DETAIL (this OVERRIDES any instinct to consolidate):
+  Emit a step for every distinct field the recording shows the user set. NEVER
+  collapse multiple field changes into one step, and NEVER collapse a whole modal
+  form into a single step or a details.fields map. There are exactly two shapes
+  for a field change, chosen by WHERE the field lives:
 
-  FORM CONSOLIDATION: When the recording shows a modal or dialog form being
-  filled (e.g. New Task, New Case, Edit Record), emit ONE `ui_action` step per
-  FORM SUBMIT (i.e. per Save/Create button click). List all fields being set in
-  the description; include a details.fields object mapping field_label → value.
-  Do NOT emit a separate step for clicking into each field, opening each
-  dropdown, or selecting each value. Exception: if a field requires a distinct
-  navigation (e.g. opening a date picker calendar), it may be a separate step.
+  A. INLINE RECORD-PAGE FIELD EDIT — a field edited directly on an open record
+     through its pencil (edit) icon (e.g. Contact Name, Status, Priority, Owner
+     on a Case detail panel). Emit ONE `sequence` step, then a SEPARATE Save step.
+       • RECORD LOOKUP field (type a name, then pick the matching record so it
+         becomes a linked pill):
+           kind: "sequence"
+           details.steps:
+             {"kind": "click_pencil_icon", "target": "<field label>"}
+             {"kind": "fill_field", "label": "<field label>", "value": "<value>"}
+             {"kind": "click_dropdown_result", "text": "<value>"}
+           success_condition: "The <field label> field shows '<value>' as a
+             linked-record pill in read-only view"
+       • PICKLIST field (Status, Priority, Type — pick from a fixed dropdown):
+           kind: "sequence"
+           details.steps:
+             {"kind": "click_pencil_icon", "target": "<field label>"}
+             {"kind": "select_dropdown_option", "label": "<field label>", "value": "<value>"}
+           success_condition: "The <field label> field shows '<value>' in read-only view"
+     After EACH inline `sequence` step add a SEPARATE `ui_action` Save step
+     (intent "click", target_description "Save button on the ... inline-edit
+     footer") whose success_condition asserts the SAVED value is visible in
+     read-only view (not merely that the Save/Cancel footer disappeared).
 
-  SAVE steps: After any inline-edit field change on a record page (NOT inside a
-  modal form), add one "click Save" step. Inside a modal form, the Save/Create
-  button click ends the form step itself — do not add an extra step for it.
+  B. MODAL / DIALOG FORM (New Task, New Case, Edit Record modal). Emit ONE step
+     PER FIELD in the order the user fills them, then a Save step, then a Verify
+     step. Do NOT collapse the form and do NOT use a details.fields map.
+       1. `ui_action`, intent "click" — open the modal (e.g. click "New Task").
+          success_condition: "The <modal name> modal is open and its fields are visible".
+       2. One `ui_action` per field, intent "fill":
+            details.target_description: "<field label> in the <modal name> modal"
+            details.value: "<value>"
+            success_condition: "The <field label> field in the <modal name> modal
+              contains/shows '<value>'"
+       3. `ui_action`, intent "click" — the modal's Save/Create button, with a
+          success_condition that the modal closed and no validation error shows.
+       4. `ui_action`, intent "verify" — confirm the created record is visible;
+          set on_failure: "skip" so a failed read never halts the run.
+
+  ASSIGNED-TO / OWNER LOOKUPS IN A MODAL default to the CURRENT USER. When the
+  intended assignee differs from the current user, the field step's description
+  MUST instruct: first clear the pre-filled default (click the X on the existing
+  pill), THEN type the intended name, wait for the inline dropdown, and click the
+  matching record. Its success_condition MUST assert the intended person is
+  selected and is NOT the default owner and is not empty.
 
 Navigation Rules (critical for Salesforce and web apps):
   - PREFER `navigate` steps with direct URLs over ui_action steps that click
