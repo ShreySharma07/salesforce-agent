@@ -14,6 +14,8 @@ The first focus is **Salesforce data hygiene** (creating and updating leads/cont
 |---|---|
 | 🎥 **Learns by watching** | Record yourself once. No scripting, no selectors, no brittle macros. |
 | 🧠 **Genuinely agentic** | A ReAct loop reasons over live screenshots and adapts — it doesn't replay fixed clicks. |
+| ⚡ **Deterministic where it counts** | Well-understood UI patterns run as `sequence` steps — no LLM in the loop, ~5–7× faster and rock-solid. |
+| 📈 **Gets better every run** | Procedural + episodic memory primes each run with what worked (and what didn't) last time. |
 | 🔒 **Zero-trust by design** | The sandbox that touches the web **never holds a credential or API key.** Ever. |
 | 👁️ **Watchable & auditable** | Watch runs live; every run keeps a full step-by-step reasoning trace. |
 | 🔌 **Connected apps, on demand** | The agent decides *when* it needs Salesforce and logs in itself — via a one-time token, never a password. |
@@ -38,9 +40,9 @@ The first focus is **Salesforce data hygiene** (creating and updating leads/cont
 
 1. **Record** a screen capture of the task once.
 2. The platform turns it into a structured **Plan** (FFmpeg keyframes → vision-LLM captions → plan synthesis).
-3. You trigger it; a **fresh Docker sandbox** spawns and executes the plan autonomously.
+3. You trigger it; the backend **primes the run from memory**, then a **fresh Docker sandbox** spawns and executes the plan autonomously.
 4. **Watch it work live** in your browser.
-5. **Inspect** the full Reason → Act → Observe trace afterward — every thought, action, and observation.
+5. **Inspect** the full Reason → Act → Observe trace afterward — every thought, action, and observation. The backend **reflects on the run** so the next one starts smarter.
 
 ---
 
@@ -78,7 +80,7 @@ Two security properties this guarantees:
 - 🔑 **The LLM API key never enters the sandbox.** All model calls are proxied through the backend.
 - 🎫 **The Salesforce token never enters the sandbox.** The agent logs in via Salesforce's `singleaccess` endpoint, which mints a **one-time login URL** on the backend — the real token stays locked in the vault.
 
-Full design: see [`ARCHITECTURE.md`](./ARCHITECTURE.md).
+Full design: see [`Architecture.md`](./Architecture.md).
 
 ---
 
@@ -110,13 +112,17 @@ cp .env.example .env
 ```ini
 GEMINI_API_KEY=<your key>
 LLM_PROVIDER=gemini
-LLM_MODEL=gemini-2.5-flash
+LLM_MODEL=gemini-3.1-pro-preview     # the backend proxies all model calls; the sandbox never sees the key
 
 # generate: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 VAULT_ENCRYPTION_KEY=<generated key>
 
 PUBLIC_BACKEND_BASE_URL=http://localhost:8001
 ```
+
+> 💡 The ReAct loop is the run's cost center. For faster/cheaper runs, point
+> `LLM_MODEL` at a Flash-class model — the loop is mostly mechanical clicks and
+> fills that don't need a heavyweight reasoning model.
 
 > ⚠️ **Don't also `export GEMINI_API_KEY` in your shell.** A shell variable overrides `.env` and causes "wrong key" confusion. Keep it only in `.env`.
 
@@ -180,16 +186,24 @@ salesforce-agent/
 │       ├── api/             # HTTP endpoints (plans, automations, runs,
 │       │                    #   oauth, mcp, sandbox_llm, sandbox_frontdoor)
 │       ├── agent/           # video → plan pipeline
-│       ├── services/        # vault, oauth, mcp, frontdoor, sandbox runner
-│       ├── db/              # SQLAlchemy models + Alembic migrations
+│       ├── core/            # guardrails, budgets, prompts, LLM factory
+│       ├── services/        # vault, oauth, mcp, memory, sandbox runner
+│       ├── db/              # SQLAlchemy models + migrations
 │       └── schemas/         # Pydantic contracts
+├── frontend/                # Next.js dashboard (upload · plan · run · history)
 ├── sandbox/                 # Docker image definition
 └── sandbox_agent/           # code that runs INSIDE the container
-    ├── executor.py          # walks the Plan, dispatches each step
-    ├── browser_mode.py      # the ReAct loop (Reason-Act-Observe)
+    ├── executor.py          # walks the Plan; sequence + ReAct dispatch
+    ├── browser_mode.py      # ReAct loop + sequence sub-action primitives
+    ├── grounding.py         # screenshot annotation + DOM extraction
     ├── llm_client.py        # → backend LLM proxy (no key here)
     └── mcp_client.py        # → backend MCP endpoint
 ```
+
+> **Plan steps come in two flavors:** deterministic `sequence` steps (ordered
+> sub-actions like `click_pencil_icon` → `fill_field` → `click_dropdown_result`,
+> run with no LLM) and agentic `ui_action`/`extract` steps (handed to the ReAct
+> loop). Prefer `sequence` for known UI patterns — it's faster and never wanders.
 
 ---
 
@@ -230,21 +244,24 @@ curl -s http://localhost:8001/runs/<run_id> | python -m json.tool
 ## 📍 Status
 
 **✅ Built & verified**
-- Video → plan pipeline
-- ReAct executor loop with full reasoning trace + cost tracking
+- Video → plan pipeline (keyframes · narration · captions · plan synthesis)
+- Executor with two step engines: deterministic `sequence` steps + agentic ReAct loop
+- Full reasoning trace + cost tracking per run
+- Per-step idempotency via `success_condition`; drain-the-queue loops
+- Learning loop — procedural + episodic memory primes each run; reflection after
 - Isolated Docker sandbox with live (noVNC) view
 - LLM proxy — sandbox holds no API key
 - Per-run token auth for every sandbox → backend call
 - Encrypted credential vault + OAuth (Salesforce)
 - `singleaccess` FrontDoor — one-time login URL, token never leaves the backend
-- **Agent-initiated `open_app`** — the agent decides on its own when it needs a connected app and logs in lazily, mid-task
+- **Agent-initiated `open_app`** — logs into a connected app lazily, mid-task
 - Quota circuit-breaker — fails fast & clean instead of hanging
-- Executor honors per-step `on_failure` (abort / pause / continue)
-
-**🚧 In progress**
-- Final end-to-end Salesforce-UI run (mechanism verified; gated on LLM quota)
+- Executor honors per-step `on_failure` (`abort` / `pause` / `skip` / `retry`)
+- End-to-end Salesforce run verified (contact update · status escalation · task creation)
+- Next.js dashboard (upload · plan review · live run · history)
 
 **🗺️ Roadmap**
-- Multi-user + authentication (currently single default user)
-- Web dashboard (upload · plan review · live run · history)
+- Harden multi-user data scoping (currently single default user)
+- Embedding-based memory retrieval on top of keyword signatures
+- Run-speed pass — move more steps to `sequence`, trim per-observe waits
 - Scheduling & triggers
