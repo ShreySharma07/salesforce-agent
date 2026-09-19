@@ -24,3 +24,5 @@ sandbox_agent/.venv
 # Local secrets and scratch files that must never be committed
 **/cookies.txt
 **/printenv
+
+**/.next/
