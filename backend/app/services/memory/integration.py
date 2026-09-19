@@ -40,6 +40,7 @@ log = logging.getLogger(__name__)
 
 
 def _plan_goal_and_steps(plan: Plan) -> tuple[str, list[str]]:
+    """Pull the (goal, [step descriptions]) pair that all memory keys are derived from."""
     goal = getattr(plan, "goal", "") or getattr(plan, "summary", "") or ""
     step_descs = [getattr(s, "description", "") or "" for s in plan.steps]
     return goal, step_descs

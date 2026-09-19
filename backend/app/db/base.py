@@ -35,6 +35,7 @@ _sessionmaker: async_sessionmaker[AsyncSession] | None = None
 
 
 def get_engine() -> AsyncEngine:
+    """Lazily create the process-wide async engine from settings.database_url."""
     global _engine
     if _engine is None:
         settings = get_settings()
@@ -55,6 +56,7 @@ def get_engine() -> AsyncEngine:
 
 
 def get_sessionmaker() -> async_sessionmaker[AsyncSession]:
+    """Lazily create the process-wide session factory (expire_on_commit=False)."""
     global _sessionmaker
     if _sessionmaker is None:
         _sessionmaker = async_sessionmaker(

@@ -17,4 +17,10 @@
 spikes/
 backend/.local_storage/
 sandbox_agent/.venv
-cookies.txt
+
+# Build artifacts
+**/*.egg-info/
+
+# Local secrets and scratch files that must never be committed
+**/cookies.txt
+**/printenv

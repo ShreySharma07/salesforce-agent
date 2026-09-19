@@ -19,9 +19,17 @@ dependencies = [
     "alembic>=1.13.0",
     "psycopg[binary]>=3.2.0",
     "cryptography>=43.0.0",
+    # Password hashing (auth). Falls back to stdlib PBKDF2 if absent, but
+    # argon2 is the intended scheme — keep it installed.
+    "argon2-cffi>=23.1.0",
+    # EmailStr validation on the auth schemas.
+    "email-validator>=2.1.0",
 ]
 
 [project.optional-dependencies]
+# Alternative LLM provider: LLM_PROVIDER=anthropic (backend pipeline + the
+# sandbox LLM proxy both use it).
+anthropic = ["anthropic>=0.40.0"]
 dev = ["pytest>=8.3.0", "pytest-asyncio>=0.24.0", "ruff>=0.7.0"]
 
 [build-system]
@@ -34,7 +42,10 @@ include = ["app*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
+# Async tests are plain `async def` with no decorator; auto mode collects
+# them. Requires pytest-asyncio (declared in the dev extra).
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 
 [tool.ruff]
 line-length = 100

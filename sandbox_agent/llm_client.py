@@ -41,8 +41,9 @@ class LLMClientError(Exception):
 
 
 class QuotaExhaustedError(LLMClientError):
-    """Daily LLM quota exhausted. The executor should abort the whole run —
-    retrying or continuing to later steps is pointless until quota resets."""
+    """The run can make no further model calls — daily provider quota is gone,
+    or the run spent its own call/dollar budget. Either way the executor aborts
+    the whole run: retrying or continuing to later steps cannot succeed."""
     pass
 
 
@@ -114,7 +115,9 @@ class GeminiClient:
         if not data.get("ok"):
             # Backend caught a real Gemini error — surface it like the old
             # client did (as a raised exception the loop records in its trace).
-            if data.get("quota_exhausted"):
+            # Both flags are terminal for the run: provider quota will not
+            # refill today, and the run budget ceiling will not move.
+            if data.get("quota_exhausted") or data.get("budget_exceeded"):
                 raise QuotaExhaustedError(
                     f"LLM error: {data.get('error', 'daily quota exhausted')}"
                 )

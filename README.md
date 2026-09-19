@@ -143,7 +143,25 @@ python -m app.main
 curl -s http://localhost:8001/health | python -m json.tool   # vault_configured: true
 ```
 
-### 5 · Run a demo (no credentials needed)
+### 5 · Turn a recording into a plan
+
+```bash
+# upload → returns {"video_id": "...", "status": "uploaded"}
+curl -s -F "file=@recording.mp4" http://localhost:8001/videos | python -m json.tool
+
+# poll until status is "completed" and plan_id is set
+curl -s http://localhost:8001/videos/<video_id> | python -m json.tool
+
+# review it, then approve
+curl -s http://localhost:8001/plans/<plan_id> | python -m json.tool
+curl -s -X POST http://localhost:8001/plans/<plan_id>/approve
+```
+
+A plan lands as `pending_approval` — nothing runs until a human approves it.
+To reshape it, describe the change in plain language:
+`POST /plans/<plan_id>/correct  {"feedback": "do this for every new case, not just 00001378"}`.
+
+### 6 · Run a demo (no credentials needed)
 
 ```bash
 python -m scripts.run_plan_e2e .local_storage/plans/plan_arxiv_demo.json --watch
@@ -255,13 +273,18 @@ curl -s http://localhost:8001/runs/<run_id> | python -m json.tool
 - Encrypted credential vault + OAuth (Salesforce)
 - `singleaccess` FrontDoor — one-time login URL, token never leaves the backend
 - **Agent-initiated `open_app`** — logs into a connected app lazily, mid-task
-- Quota circuit-breaker — fails fast & clean instead of hanging
+- Quota circuit-breaker + per-run call/dollar budget — fails fast & clean
+- Plan guardrails — an invalid or unapproved plan can never reach a sandbox
 - Executor honors per-step `on_failure` (`abort` / `pause` / `skip` / `retry`)
+- Resumable pauses — answer a stuck run and it continues from that step
+- Per-user scoping on every route; credentials and runs are never shared
+- `POST /videos` — upload a recording and poll it into a Plan
 - End-to-end Salesforce run verified (contact update · status escalation · task creation)
 - Next.js dashboard (upload · plan review · live run · history)
 
 **🗺️ Roadmap**
-- Harden multi-user data scoping (currently single default user)
+- Durable run queue — execution is in-process today, so runs don't survive a restart
+- Cloud sandbox runners (Modal / Fargate are interface stubs today)
 - Embedding-based memory retrieval on top of keyword signatures
 - Run-speed pass — move more steps to `sequence`, trim per-observe waits
 - Scheduling & triggers

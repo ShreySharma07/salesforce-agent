@@ -17,7 +17,7 @@ from app.schemas.auth import User
 from app.schemas.plan import Plan, Step, StepKind
 from app.schemas.automation import Automation
 from app.services.scoping import ScopedRepo, AccessDenied
-from app.services.auth.service import (
+from app.services.oauth.service import (
     InMemoryUserStore, InMemorySessionStore,
     register, login, resolve_session, logout, AuthError,
 )

@@ -17,6 +17,7 @@ task from scratch.
 """
 from __future__ import annotations
 
+import logging
 from typing import Protocol
 
 from app.schemas.memory import Procedure
@@ -25,7 +26,14 @@ from app.services.memory.distiller import (
     merge_procedure,
     record_attempt_failure,
 )
-from app.services.memory.signature import signature_for_plan
+from app.services.memory.signature import (
+    best_signature_match,
+    signature_for_plan,
+    signature_similarity,
+)
+
+
+log = logging.getLogger(__name__)
 
 
 class ProcedureStore(Protocol):
@@ -65,13 +73,36 @@ async def retrieve(
 ) -> Procedure | None:
     """Task-start lookup: is there a known procedure for this task?
 
-    Returns the procedure if found (caller decides whether to trust it via
-    .is_trusted). Returns None if we've never done this task.
+    Exact signature match first (cheap, indexed). If nothing matches, fall
+    back to the closest stored signature by token overlap — a reworded goal
+    describing the same task would otherwise be invisible and the system
+    would relearn a procedure it already has.
+
+    Returns the procedure if found (the caller decides whether to trust it
+    via .is_trusted). Returns None if we have never done this task.
     """
     sig = signature_for_plan(goal, step_descriptions)
     if not sig:
         return None
-    return await store.get_by_signature(user_id, sig)
+
+    exact = await store.get_by_signature(user_id, sig)
+    if exact is not None:
+        return exact
+
+    known = await store.list_for_user(user_id)
+    if not known:
+        return None
+    match = best_signature_match(sig, [p.task_signature for p in known])
+    if match is None:
+        return None
+    for proc in known:
+        if proc.task_signature == match:
+            log.info(
+                "memory: no exact procedure for %r — using near match %r (overlap %.2f)",
+                sig, match, signature_similarity(sig, match),
+            )
+            return proc
+    return None
 
 
 async def learn_from_run(

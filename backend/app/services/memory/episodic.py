@@ -23,7 +23,7 @@ from datetime import datetime
 from typing import Any, Protocol
 
 from app.schemas.memory import Episode, EpisodeKind
-from app.services.memory.signature import normalize_goal
+from app.services.memory.signature import best_signature_match, normalize_goal
 
 
 # ---------------------------------------------------------------------------
@@ -280,9 +280,23 @@ async def recall(
     keys = [situation_key(goal=goal)]
     for desc in step_descriptions:
         keys.append(situation_key(goal=goal, step_intent=desc))
+
+    # A reworded step description shifts its situation key, which would hide
+    # the very episode recorded for that step last run. Fall back to the
+    # closest key this user actually has.
+    known_keys = {ep.situation_key for ep in await store.list_for_user(user_id)}
+    resolved: list[str] = []
     for k in keys:
         if not k:
             continue
+        if k in known_keys:
+            resolved.append(k)
+            continue
+        near = best_signature_match(k, sorted(known_keys))
+        if near:
+            resolved.append(near)
+
+    for k in resolved:
         for ep in await store.find(user_id, k):
             if ep.id in seen_ids:
                 continue

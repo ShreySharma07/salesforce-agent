@@ -17,7 +17,8 @@ def test_mock_unknown_purpose():
     assert "MOCK RESPONSE" in response.text
 
 
-def test_factory_returns_mock_by_default():
-    """With LLM_PROVIDER=mock (the default), factory yields MockLLMClient."""
+def test_factory_returns_mock_when_configured():
+    """With LLM_PROVIDER=mock (pinned for the test session in conftest),
+    the factory yields MockLLMClient. The shipped default is gemini."""
     client = get_llm_client()
     assert isinstance(client, MockLLMClient)

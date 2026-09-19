@@ -56,12 +56,20 @@ The system has **two processes** separated by a hard trust boundary:
 
 ### 2.1 — Recording becomes a Plan
 
+`POST /videos` accepts the upload and runs the pipeline in the background;
+`GET /videos/{id}` polls it until `plan_id` is set. (The same stages are
+available offline via `python -m scripts.process_video`.)
+
 ```
 screen recording → [video_processor]     → keyframes (ffmpeg)
                  → [audio_transcriber]    → narration timeline (optional)
                  → [keyframe_captioner]   → per-frame descriptions (Gemini vision)
                  → [plan_generator]       → structured Plan → saved to DB
 ```
+
+Captions are persisted to `captions/<video_id>.json` so a later correction
+(`POST /plans/{id}/correct`) can regenerate the plan against the original
+recording rather than against the previous plan alone.
 
 The **Plan is the master contract** of the whole system. Everything upstream
 produces it; everything downstream consumes it. A Plan is an ordered list of
@@ -72,6 +80,7 @@ and an `on_failure` policy (`pause` · `skip` · `abort` · `retry`).
 
 ```
 POST /automations/{id}/run
+   → guardrails: plan must be APPROVED and pass validation (§8)
    → create Run row
    → mint RUN_TOKEN (store only its SHA-256 hash on the Run)
    → MEMORY: prime_steps() — attach per-step hints from past runs
@@ -207,8 +216,11 @@ best-effort: a memory failure never breaks a run.
   (multiple successes, high success rate), so a single lucky run isn't trusted
   blindly.
 - **Retrieval** is a normalized, keyword-based **task signature** (deliberately
-  non-embedding for v1: deterministic, debuggable, free). An embedding layer
-  can sit on top later without changing the stored schema.
+  non-embedding for v1: deterministic, debuggable, free). An exact signature
+  match is tried first; failing that, the closest stored signature by token
+  overlap (Jaccard ≥ 0.6, plural- and quantifier-insensitive) is used — so a
+  reworded goal finds the procedure it already learned instead of relearning
+  it. An embedding layer can sit on top later without changing the schema.
 
 Stores are SQL-backed and persist across restarts.
 
@@ -242,8 +254,21 @@ the clear so the system can show connection status without decrypting.
 ### 6.4 — Per-run token validation
 Every sandbox → backend call (`/mcp`, `/sandbox/llm`, `/sandbox/frontdoor`)
 carries the `RUN_TOKEN` as a bearer credential. The backend hashes it and
-compares to the hash stored on the Run. A compromised sandbox can act only for
-its own run — it cannot swap a run_id to reach another user's data.
+compares (constant-time) to the hash stored on the Run. A compromised sandbox
+can act only for its own run — it cannot swap a run_id to reach another user's
+data.
+
+There is **no anonymous path**: a call with no run_id, an unknown run, or a
+bad token is rejected with 401. These three endpoints hand out a user's
+integration credentials, the backend's LLM key, and a logged-in Salesforce
+session respectively, so none of them may ever fall back to a default user.
+
+### 6.5 — Per-user scoping
+Plans, automations, runs, credentials and OAuth connections are all keyed to
+the authenticated user. Reads filter by owner and return 404 (not 403) for
+another user's object, so the API never confirms that someone else's id
+exists. Enforcement lives at one chokepoint (`services/scoping.py`) rather
+than in each route.
 
 ---
 
@@ -290,7 +315,9 @@ worthless after one use.
 
 - **Honors `on_failure`** — a failed step is routed by its declared policy:
   `abort` stops the run, `pause` halts for human review, `skip` proceeds to the
-  next step, `retry` re-attempts.
+  next step, and `retry` re-attempts the step once before falling back to
+  `pause`. An unrecognized value is treated as `pause` (the safe default) and
+  logged, rather than silently degrading to "continue".
 - **Per-step idempotency** — every state-changing step carries a
   `success_condition` checked *before* acting (skip if done) and *after*
   (verify). This makes re-runs and partial-completion recovery automatic.
@@ -301,6 +328,24 @@ worthless after one use.
   occasional bad-image blip, with backoff.
 - **Quota circuit-breaker** — daily quota exhaustion fails fast and aborts the
   whole run rather than marching every remaining step into the same wall.
+- **Per-run budget** — the LLM proxy meters every model call for a run against
+  a call count and dollar ceiling (`core/budget`). Exceeding either refuses
+  further calls and aborts the run, and the measured spend becomes the Run's
+  recorded cost.
+- **Plan guardrails** — `core/guardrails` validates a plan when it is saved and
+  again when it is approved: dangling loop/decision references, missing
+  required details, unknown sequence sub-actions, non-http URLs and steps that
+  would perform a manual login are rejected before a container is ever spawned.
+- **Pause is resumable** — a paused run is answered with
+  `POST /runs/{id}/resume`. The answer is recorded as a HumanIntervention (the
+  highest-value episodic memory the system collects), and a fresh run restarts
+  **at the paused step** carrying the earlier run's variables. This works
+  because state-changing steps carry a `success_condition`: anything already
+  done is observed and skipped rather than repeated.
+- **No orphaned runs** — runs execute as in-process background tasks, so a
+  restart would otherwise leave rows stuck in RUNNING forever. Startup closes
+  them out as failed, and a concurrency cap bounds how many sandboxes run at
+  once.
 
 ---
 
@@ -310,20 +355,25 @@ worthless after one use.
 backend/app/
   main.py            FastAPI app; runs migrations on startup
   config.py          single typed Settings object (12-factor, env-driven)
-  api/               thin HTTP routers (plans, automations, runs, oauth,
-                       credentials, mcp, sandbox_llm, sandbox_frontdoor)
+  api/               thin HTTP routers (videos, plans, automations, runs,
+                       auth, oauth, credentials, mcp, sandbox_llm,
+                       sandbox_frontdoor)
   agent/             video → plan pipeline
     video_processor.py       recording → keyframes
     audio_transcriber.py     recording → narration timeline
     keyframe_captioner.py    keyframes → vision captions
     plan_generator.py        captions → structured Plan
   core/
-    guardrails/      plan/action safety checks
-    budget/          per-run cost + iteration budgets
-    prompts/         shared prompt fragments
-    llm/             provider client + factory
+    guardrails/      plan validation (structure, safety, reachability)
+    budget/          per-run call/cost ceilings + model pricing
+    prompts/         the plan-synthesis and captioner system prompts
+    llm/             provider client + factory (gemini · anthropic · mock)
   services/
     run_repo.py      the single SqlRepo (all DB access goes through it)
+    run_executor.py  spawn → execute → persist one run
+    run_control.py   cancel · resume · orphan cleanup
+    run_auth.py      per-run token validation (shared by sandbox endpoints)
+    scoping.py       the multi-tenant chokepoint (ScopedRepo)
     vault.py         Fernet-encrypted credential storage
     oauth/           OAuth 2.0 flow + automatic token refresh
     mcp/             MCP servers wrapping external APIs as tools
@@ -363,13 +413,20 @@ sandbox/             Docker image definition (Chromium + noVNC + agent server)
 
 ## 11 · Known limitations (honest list)
 
-- **Single-user by default.** Runs execute as one default user; full
-  multi-user data scoping is still being hardened.
-- **Keyword memory retrieval.** Task signatures are keyword-based; near-duplicate
-  tasks with reworded steps can fragment into separate procedures until an
-  embedding layer is added.
+- **Multi-user, but single-process.** Data is scoped per user throughout, and
+  auth is enforced on every user-facing route. Execution is still in-process
+  (FastAPI background tasks) with a concurrency cap — there is no queue, so
+  runs do not survive a restart and do not spread across machines. That is the
+  next thing to change before real multi-tenant load.
+- **Keyword memory retrieval.** Task signatures are keyword-based, with a
+  token-overlap fallback for rewordings. Genuinely different phrasings of the
+  same task (different vocabulary, not just different word order) can still
+  fragment until an embedding layer is added.
 - **LLM latency dominates run time.** The ReAct loop is the cost center;
   moving more steps to `sequence` and trimming per-observe waits is the active
   optimization front.
 - **CAPTCHA is an explicit non-goal.** The agent pauses and hands off; it never
   attempts to solve one.
+- **Cloud runners are stubs.** `modal.py` and `fargate.py` implement the
+  interface but raise NotImplementedError; `local_docker` is the only working
+  runner, and it is explicitly not for production multi-user use.

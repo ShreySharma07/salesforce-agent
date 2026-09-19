@@ -25,7 +25,16 @@ def get_llm_client(purpose: str | None = None) -> LLMClient:
         )
 
     if settings.llm_provider == "anthropic":
-        # Wired in when we add the Anthropic implementation.
-        raise NotImplementedError("Anthropic client not yet implemented")
+        from app.core.llm.anthropic_client import AnthropicLLMClient
+        return AnthropicLLMClient(
+            model=settings.llm_model,
+            api_key=settings.anthropic_api_key,
+        )
+
+    if settings.llm_provider == "openai":
+        raise NotImplementedError(
+            "OPENAI provider is not implemented. Use LLM_PROVIDER=gemini, "
+            "anthropic, or mock."
+        )
 
     raise ValueError(f"Unknown LLM_PROVIDER: {settings.llm_provider}")

@@ -25,6 +25,7 @@ SESSION_COOKIE = "session"
 
 
 async def get_current_user(session: str | None = Cookie(default=None)) -> User:
+    """Resolve the session cookie to a User; in auth_dev_mode fall back to the default user."""
     settings = get_settings()
     user = None
     if session:
@@ -50,4 +51,5 @@ async def get_current_user(session: str | None = Cookie(default=None)) -> User:
 
 
 async def get_scoped_repo_dep(user: User = Depends(get_current_user)) -> ScopedRepo:
+    """Repository view bound to the authenticated user (cannot read other tenants)."""
     return get_scoped_repo(user.id)

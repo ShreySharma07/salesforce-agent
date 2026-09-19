@@ -47,6 +47,7 @@ class VideoManifest:
 
 
 def ensure_ffmpeg() -> None:
+    """Fail fast with an install hint if ffmpeg/ffprobe are not on PATH."""
     for tool in ("ffmpeg", "ffprobe"):
         if shutil.which(tool) is None:
             raise RuntimeError(
@@ -56,6 +57,7 @@ def ensure_ffmpeg() -> None:
 
 
 def probe_duration(video_path: Path) -> float:
+    """Return the video duration in seconds via ffprobe."""
     out = subprocess.run(
         [
             "ffprobe", "-v", "error",
@@ -200,6 +202,7 @@ def _parse_showinfo_timestamps(stderr: str) -> list[float]:
 
 
 def _manifest_to_dict(m: VideoManifest) -> dict:
+    """Serialize a VideoManifest (and its Keyframes) for manifest.json."""
     return {
         "video_id": m.video_id,
         "source_video_key": m.source_video_key,
@@ -210,6 +213,7 @@ def _manifest_to_dict(m: VideoManifest) -> dict:
 
 
 def load_manifest(video_id: str, *, storage: Storage | None = None) -> VideoManifest:
+    """Reload a previously written manifest.json for a video id."""
     storage = storage or get_storage()
     raw = storage.read_text(f"videos/{video_id}/manifest.json")
     data = json.loads(raw)

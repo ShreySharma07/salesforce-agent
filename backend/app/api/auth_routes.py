@@ -23,6 +23,7 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 def _set_session_cookie(response: Response, token: str) -> None:
+    """Attach the raw session token as an httpOnly cookie (secure only outside dev mode)."""
     settings = get_settings()
     response.set_cookie(
         key=SESSION_COOKIE,

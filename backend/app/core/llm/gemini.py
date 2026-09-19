@@ -52,6 +52,7 @@ class GeminiLLMClient(LLMClient):
         max_tokens: int = 4096,
         temperature: float = 0.0,
     ) -> LLMResponse:
+        """Single-turn generate (text + optional PNG images) with usage/cost accounting."""
         from google.genai import types
         from google.genai.types import Content, Part
 
@@ -107,6 +108,7 @@ class GeminiLLMClient(LLMClient):
         system: str | None = None,
         images: list[bytes] | None = None,
     ) -> tuple[Any, UsageEvent]:
+        """JSON-mode generate parsed into `schema`; returns (None, usage) on bad JSON."""
         # Use json_mode and parse — full schema-aware mode comes later.
         response = self.generate(
             prompt, purpose=purpose, system=system, images=images, json_mode=True,

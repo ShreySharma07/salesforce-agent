@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from app.agent.video_processor import Keyframe, VideoManifest
 from app.core.llm.client import LLMClient
 from app.core.llm.factory import get_llm_client
+from app.core.prompts import CAPTION_SYSTEM_PROMPT
 from app.services.storage import Storage, get_storage
 
 
@@ -30,19 +31,6 @@ class FrameCaption:
     narration: str = field(default="")  # spoken narration overlapping this frame, if any
 
 
-CAPTION_SYSTEM_PROMPT = """You are watching a screen recording of someone performing a task on their computer. You will receive frames in chronological batches.
-
-For EACH frame, output ONE detailed sentence that captures:
-  - The application/website visible (with URL if shown in browser)
-  - SPECIFIC text visible on screen — exact subject lines, sender names, button labels, headings
-  - What the user is interacting with (input field, button, link)
-  - What just happened (e.g. "email opened, body now visible")
-
-Quote literal text in single quotes. Example: "Gmail inbox visible at mail.google.com/u/0/#inbox, top email shows sender 'simplify-noreply' with subject 'Your Daily Internship Digest - Jan 28'."
-
-DO NOT speculate beyond what is visible. DO NOT generalize ("an email" → name the actual subject). DO NOT add filler.
-
-Output as a JSON array of strings, one per frame, in order. No prose, no fences."""
 
 def caption_keyframes(
     manifest: VideoManifest,

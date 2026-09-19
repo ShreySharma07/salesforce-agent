@@ -31,6 +31,9 @@ _TASK_VERBS = {
 
 
 def _tokens(text: str) -> list[str]:
+    """Tokenize a goal/step string into identity-bearing lowercase words:
+    strips URLs, quoted values, numbers/ids, non-initial capitalized words
+    (treated as specific values) and stopwords."""
     # 1. Strip specific values BEFORE lowercasing so we can use case as a
     #    signal: urls, quoted strings, numbers/ids.
     text = re.sub(r"https?://\S+", " ", text)
@@ -98,3 +101,75 @@ def signature_for_plan(goal: str, step_descriptions: list[str]) -> str:
     if extra:
         return (base + " | " + " ".join(extra)).strip(" |")
     return base
+
+# ---------------------------------------------------------------------------
+# Near-match retrieval
+# ---------------------------------------------------------------------------
+# Exact signature equality is the fast path, but it fragments memory: reword
+# a goal ("Escalate new Acme cases" vs "Escalate any new case for Acme") and
+# the signature changes, so a hard-won procedure is never found again and the
+# system silently relearns it. Token overlap recovers those near-duplicates
+# while staying deterministic and free — no embedding model, no network.
+
+# Jaccard overlap above this counts as "the same task". Tuned to accept
+# rewordings while rejecting genuinely different tasks that share a verb
+# (e.g. "create lead" vs "create task" overlap at 0.33).
+SIMILARITY_THRESHOLD = 0.6
+
+
+# Quantifiers carry no task identity ("escalate new cases" vs "escalate any
+# case" are the same task). Dropped when COMPARING only — signature
+# generation is left untouched so already-stored signatures stay valid.
+_COMPARISON_NOISE = {"any", "all", "every", "each", "some", "new"}
+
+
+def _stem(token: str) -> str:
+    """Crudest useful stem: fold a trailing plural 's' so case/cases match.
+
+    Deliberately not a real stemmer — signatures are short, controlled
+    vocabulary, and a wrong aggressive stem would merge distinct tasks.
+    """
+    if len(token) > 3 and token.endswith("s") and not token.endswith("ss"):
+        return token[:-1]
+    return token
+
+
+def signature_tokens(signature: str) -> set[str]:
+    """The comparable token set of a signature (its ' | ' parts are joined).
+
+    Stems plurals and drops quantifier noise so two phrasings of the same
+    task compare equal.
+    """
+    return {
+        _stem(t) for t in signature.replace("|", " ").split()
+        if t and t not in _COMPARISON_NOISE
+    }
+
+
+def signature_similarity(a: str, b: str) -> float:
+    """Jaccard overlap of two signatures' tokens, 0.0-1.0.
+
+    Symmetric and order-independent, which matches how signatures are built
+    (sorted, deduped tokens).
+    """
+    ta, tb = signature_tokens(a), signature_tokens(b)
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / len(ta | tb)
+
+
+def best_signature_match(
+    target: str, candidates: list[str], *, threshold: float = SIMILARITY_THRESHOLD,
+) -> str | None:
+    """The closest candidate signature to `target`, or None below threshold.
+
+    Ties break toward the longer (more specific) signature so a near-match
+    never silently resolves to a vaguer procedure.
+    """
+    best, best_score = None, 0.0
+    for cand in candidates:
+        score = signature_similarity(target, cand)
+        if score > best_score or (score == best_score and best and len(cand) > len(best)):
+            if score >= threshold:
+                best, best_score = cand, score
+    return best

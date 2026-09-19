@@ -15,14 +15,14 @@ The endpoint:
   3. Invoke MCPServer.call_tool(tool, args, credentials)
   4. Return the result
 
-Security: this endpoint is INTERNAL — sandbox calls it via host.docker.internal.
-For local dev that's localhost. For production, this becomes a private VPC
-endpoint that only sandboxes can reach. We do basic auth via the run_id +
-sandbox_id verification (Phase 2a.2). For now: trust the run_id.
+Security: every call MUST carry the run_id in the body and the per-run
+token as `Authorization: Bearer <RUN_TOKEN>`. The token is hashed and compared
+to the hash stored on the Run; the Run's automation then determines which
+user's vault credentials are used. There is no anonymous / default-user
+fallback — an unauthenticated caller can never reach a user's integrations.
 """
 from __future__ import annotations
 
-import hashlib
 import logging
 from typing import Any
 
@@ -64,6 +64,7 @@ class ToolCallRequest(BaseModel):
 
 @router.get("/servers")
 async def list_servers() -> list[dict[str, Any]]:
+    """Discovery: every registered MCP server with its credential provider and tool count."""
     return [
         {
             "name": s.name,
@@ -76,6 +77,7 @@ async def list_servers() -> list[dict[str, Any]]:
 
 @router.get("/{server}/tools")
 async def list_tools(server: str) -> list[dict[str, Any]]:
+    """Discovery: the tool schemas one MCP server exposes."""
     try:
         srv = get_mcp_server(server)
     except KeyError:
@@ -96,6 +98,12 @@ async def call_tool(
     session: AsyncSession = Depends(get_session),
     authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
+    """Invoke one MCP tool on behalf of a run.
+
+    Validates the per-run bearer token (401 otherwise), resolves run -> user,
+    fetches (and auto-refreshes) the user's credential from the vault, then
+    dispatches to the MCP server.
+    """
     # 1. Resolve the server
     try:
         srv = get_mcp_server(server)
@@ -145,35 +153,20 @@ async def call_tool(
 # -----------------------------------------------------------------------
 
 async def _resolve_user_for_run(run_id: str | None, authorization: str | None) -> str:
-    """Look up which user owns this run and validate the per-run bearer token.
+    """Validate the per-run bearer token and return the owning user_id.
 
-    Falls back to default single-user mode when no run_id is supplied
-    (useful for direct testing). When a run IS found and it carries a
-    stored token hash, the Authorization header must match.
+    Rejects (401) when: no run_id, unknown run, run has no issued token,
+    missing/malformed Authorization header, or hash mismatch. Uses a
+    constant-time compare on the hashes.
     """
-    from app.config import get_settings
+    from app.services.run_auth import authenticate_run
 
-    settings = get_settings()
-    if not run_id:
-        return settings.default_user_id
-
+    run = await authenticate_run(run_id, authorization)
     repo = get_repository()
-    run = await repo.get_run(run_id)
-    if run is None:
-        return settings.default_user_id
-
-    # Validate bearer token if the run was issued one.
-    if run.mcp_token_hash is not None:
-        token = None
-        if authorization and authorization.startswith("Bearer "):
-            token = authorization.removeprefix("Bearer ")
-        if token is None or hashlib.sha256(token.encode()).hexdigest() != run.mcp_token_hash:
-            raise HTTPException(401, "invalid run token")
-
     automation = await repo.get_automation(run.automation_id)
-    if automation is None:
-        return settings.default_user_id
-    return automation.user_id or settings.default_user_id
+    if automation is None or not automation.user_id:
+        raise HTTPException(401, "run has no owning automation/user")
+    return automation.user_id
 
 
 async def _fetch_credential(

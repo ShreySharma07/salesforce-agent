@@ -16,14 +16,9 @@ Flow:
 The raw access token never leaves the backend. The sandbox only ever
 follows a single-use redirect.
 
-NOTE (verify against your real modules tomorrow):
-  - get_valid_oauth_credential() is assumed to return a dict containing
-    "access_token" and "instance_url". If your refresh module returns a
-    different shape, adjust the extraction in _get_sf_token().
 """
 from __future__ import annotations
 
-import hashlib
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -43,29 +38,16 @@ log = logging.getLogger("sandbox-frontdoor")
 
 
 async def _resolve_run_user(run_token: str | None) -> str:
-    """Validate the run token and return the owning user_id.
+    """Validate the run token (401 otherwise) and return the owning user_id.
+    FrontDoor hands out a logged-in session, so it never falls back to a
+    default user."""
+    from app.services.run_auth import authenticate_run_by_token
 
-    Unlike /mcp (which can fall back to a default user for direct testing),
-    FrontDoor always requires a valid token — it hands out a logged-in
-    session, so it must never be reachable without one.
-    """
-    settings = get_settings()
-    if not run_token:
-        raise HTTPException(401, "run_token required")
-
-    repo = get_repository()
-    token_hash = hashlib.sha256(run_token.encode()).hexdigest()
-
-    # Find the run whose stored hash matches. If your repo has a direct
-    # lookup-by-token-hash, use it; otherwise this scans recent runs.
-    run = await repo.get_run_by_token_hash(token_hash)  # see Claude Code note
-    if run is None:
-        raise HTTPException(401, "invalid run token")
-
-    automation = await repo.get_automation(run.automation_id)
-    if automation is None:
-        raise HTTPException(401, "run has no automation")
-    return automation.user_id or settings.default_user_id
+    run = await authenticate_run_by_token(run_token)
+    automation = await get_repository().get_automation(run.automation_id)
+    if automation is None or not automation.user_id:
+        raise HTTPException(401, "run has no owning automation/user")
+    return automation.user_id
 
 
 async def _get_sf_token(session: AsyncSession, user_id: str) -> tuple[str, str]:
@@ -103,6 +85,8 @@ async def frontdoor(
     ret_url: str | None = Query(None),
     session: AsyncSession = Depends(get_session),
 ):
+    """Mint a one-time Salesforce login URL for the sandbox browser and 302 to it.
+    Requires a valid run_token; the access token never leaves the backend."""
     if provider.lower() != "salesforce":
         raise HTTPException(404, f"frontdoor not supported for provider {provider!r}")
 

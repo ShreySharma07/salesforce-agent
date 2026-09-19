@@ -21,6 +21,7 @@ _PBKDF2_ROUNDS = 600_000  # OWASP-ish floor for PBKDF2-SHA256
 
 
 def _pbkdf2_hash(password: str, salt: bytes | None = None) -> str:
+    """PBKDF2-HMAC-SHA256 hash, self-describing: pbkdf2$rounds$salt_b64$dk_b64."""
     salt = salt or os.urandom(16)
     dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, _PBKDF2_ROUNDS)
     return "pbkdf2$%d$%s$%s" % (
@@ -31,6 +32,7 @@ def _pbkdf2_hash(password: str, salt: bytes | None = None) -> str:
 
 
 def _pbkdf2_verify(password: str, stored: str) -> bool:
+    """Constant-time verify of a pbkdf2$... string; False on any malformed input."""
     try:
         _, rounds_s, salt_b64, dk_b64 = stored.split("$")
         rounds = int(rounds_s)
@@ -43,6 +45,7 @@ def _pbkdf2_verify(password: str, stored: str) -> bool:
 
 
 def hash_password(password: str) -> str:
+    """Hash with argon2 when the package is available, else PBKDF2 (stdlib)."""
     try:
         from argon2 import PasswordHasher
         return PasswordHasher().hash(password)  # argon2 hashes start with "$argon2"
@@ -51,6 +54,7 @@ def hash_password(password: str) -> str:
 
 
 def verify_password(password: str, stored_hash: str) -> bool:
+    """Verify against either hash scheme, dispatching on the stored prefix."""
     if not stored_hash:
         return False
     if stored_hash.startswith("$argon2"):

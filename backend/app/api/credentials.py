@@ -17,8 +17,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import get_settings
+from app.api.deps import get_current_user
 from app.db.base import get_session
+from app.schemas.auth import User
 from app.services import vault
 
 
@@ -39,9 +40,10 @@ class StoreApiKeyBody(BaseModel):
 
 
 @router.get("", response_model=list[CredentialSummary])
-async def list_user_credentials(session: AsyncSession = Depends(get_session)):
-    settings = get_settings()
-    rows = await vault.list_credentials(session, user_id=settings.default_user_id)
+async def list_user_credentials(session: AsyncSession = Depends(get_session),
+                                user: User = Depends(get_current_user)):
+    """List credential metadata (never secrets) for the authenticated user."""
+    rows = await vault.list_credentials(session, user_id=user.id)
     return [
         CredentialSummary(
             provider=r.provider,
@@ -59,15 +61,15 @@ async def store_api_key(
     provider: str,
     body: StoreApiKeyBody,
     session: AsyncSession = Depends(get_session),
+    user: User = Depends(get_current_user),
 ):
-    """Store an API key for a provider. Replaces any existing credential
-    for this (user, provider) pair."""
-    settings = get_settings()
+    """Store an API key for the authenticated user. Replaces any existing
+    credential for this (user, provider) pair."""
     if not body.api_key.strip():
         raise HTTPException(400, "api_key must not be empty")
     row = await vault.store_credential(
         session,
-        user_id=settings.default_user_id,
+        user_id=user.id,
         provider=provider.lower(),
         kind="api_key",
         secret={"api_key": body.api_key.strip()},
@@ -83,11 +85,12 @@ async def store_api_key(
 
 @router.delete("/{provider}")
 async def delete_credential(
-    provider: str, session: AsyncSession = Depends(get_session)
+    provider: str, session: AsyncSession = Depends(get_session),
+    user: User = Depends(get_current_user),
 ):
-    settings = get_settings()
+    """Revoke a credential belonging to the authenticated user."""
     deleted = await vault.delete_credential(
-        session, user_id=settings.default_user_id, provider=provider.lower()
+        session, user_id=user.id, provider=provider.lower()
     )
     if not deleted:
         raise HTTPException(404, f"no credential for provider={provider}")

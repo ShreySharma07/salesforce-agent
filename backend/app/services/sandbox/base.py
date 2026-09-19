@@ -83,8 +83,15 @@ class SandboxRunner(ABC):
         max_steps: int = 50,
         max_seconds: int = 600,
         memory_hints: dict[str, str] | None = None,
+        start_at_step_id: str | None = None,
+        initial_variables: dict[str, Any] | None = None,
     ) -> dict:
-        """POST plan to the sandbox /run endpoint. Returns the run result."""
+        """POST plan to the sandbox /run endpoint. Returns the run result.
+
+        `start_at_step_id` + `initial_variables` resume a paused run: the
+        executor fast-forwards to that step carrying the earlier run's
+        collected variables instead of replaying the plan from the top.
+        """
 
     @abstractmethod
     async def teardown(self, handle: SandboxHandle) -> None:

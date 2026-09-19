@@ -22,9 +22,11 @@ from pydantic import BaseModel
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.deps import get_current_user
 from app.config import get_settings
 from app.db.base import get_session
 from app.db.models import Credential, OAuthState
+from app.schemas.auth import User
 from app.services import vault
 from app.services.oauth.base import build_authorize_url, exchange_code_for_tokens
 from app.services.oauth.providers import (
@@ -46,9 +48,11 @@ class ProviderInfo(BaseModel):
 
 
 @router.get("/providers", response_model=list[ProviderInfo])
-async def list_providers(session: AsyncSession = Depends(get_session)):
-    settings = get_settings()
-    user_id = settings.default_user_id
+async def list_providers(session: AsyncSession = Depends(get_session),
+                         user: User = Depends(get_current_user)):
+    """Provider status for the dashboard: configured (client id/secret set) and
+    connected (this user has a credential row)."""
+    user_id = user.id
     out: list[ProviderInfo] = []
     for name in list_provider_names():
         client_id, client_secret = get_provider_credentials(name)
@@ -73,10 +77,15 @@ async def connect(
     provider: str,
     return_to: str | None = Query(None, description="Where to redirect after OAuth completes"),
     session: AsyncSession = Depends(get_session),
+    user: User = Depends(get_current_user),
 ):
-    """Start OAuth flow. Returns 302 redirect to the provider's login page."""
+    """Start the OAuth flow for the authenticated user. 302s to the provider login.
+
+    The state row records WHICH user started the flow, so the callback (which
+    arrives as a provider redirect) stores the tokens against that same user
+    without needing its own session cookie."""
     settings = get_settings()
-    user_id = settings.default_user_id
+    user_id = user.id
 
     try:
         provider_cfg = get_provider(provider)
@@ -196,10 +205,11 @@ async def callback(
 
 
 @router.post("/{provider}/disconnect")
-async def disconnect(provider: str, session: AsyncSession = Depends(get_session)):
-    settings = get_settings()
+async def disconnect(provider: str, session: AsyncSession = Depends(get_session),
+                     user: User = Depends(get_current_user)):
+    """Delete the authenticated user's stored OAuth credential for a provider."""
     deleted = await vault.delete_credential(
-        session, user_id=settings.default_user_id, provider=provider
+        session, user_id=user.id, provider=provider
     )
     if not deleted:
         raise HTTPException(404, f"no credential for provider={provider}")
@@ -211,6 +221,7 @@ async def disconnect(provider: str, session: AsyncSession = Depends(get_session)
 # ---------------------------------------------------------------------------
 
 def _result_page(title: str, msg: str, *, ok: bool) -> HTMLResponse:
+    """Minimal HTML landing page shown after the OAuth callback completes."""
     color = "#22c55e" if ok else "#ef4444"
     icon = "✓" if ok else "✗"
     html = f"""<!doctype html>

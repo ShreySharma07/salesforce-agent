@@ -17,6 +17,8 @@ from app.schemas.auth import Session, User, UserStatus
 
 
 def _orm_to_user(row: UserOrm) -> User:
+    """ORM User -> Pydantic User. NOTE: a row with NULL email yields email="", which
+    fails EmailStr validation, so every user row must carry a real email."""
     return User(
         id=row.id,
         email=row.email or "",

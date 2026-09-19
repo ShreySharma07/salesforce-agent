@@ -31,6 +31,7 @@ class AuthError(Exception):
 
 
 def _hash_token(token: str) -> str:
+    """SHA-256 hex of a raw session token; only this hash is ever persisted."""
     return hashlib.sha256(token.encode()).hexdigest()
 
 
@@ -86,6 +87,7 @@ class InMemorySessionStore:
 
 async def register(users: UserStore, *, email: str, password: str,
                    display_name: str = "") -> User:
+    """Create a new user with a hashed password. Raises AuthError on duplicate email."""
     if await users.get_by_email(email):
         raise AuthError("email already registered")
     user = User(id=f"user_{uuid.uuid4().hex[:12]}", email=email,
@@ -135,6 +137,7 @@ async def resolve_session(users: UserStore, sessions: SessionStore,
 
 
 async def logout(sessions: SessionStore, raw_token: str) -> None:
+    """Revoke the session matching a raw cookie token (no-op if unknown)."""
     s = await sessions.get_by_token_hash(_hash_token(raw_token))
     if s is not None:
         await sessions.revoke(s.id)

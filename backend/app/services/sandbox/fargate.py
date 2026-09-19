@@ -75,7 +75,8 @@ class FargateRunner(SandboxRunner):
     async def wait_healthy(self, handle, *, timeout_seconds=60) -> bool:
         raise NotImplementedError(_NOT_IMPLEMENTED_MSG)
 
-    async def execute_plan(self, handle, plan_dict, *, max_steps=50, max_seconds=600, memory_hints=None) -> dict:
+    async def execute_plan(self, handle, plan_dict, *, max_steps=50, max_seconds=600,
+                           memory_hints=None, start_at_step_id=None, initial_variables=None) -> dict:
         raise NotImplementedError(_NOT_IMPLEMENTED_MSG)
 
     async def teardown(self, handle) -> None:

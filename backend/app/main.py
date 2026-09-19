@@ -8,7 +8,8 @@ The backend's port is 8001 by default; sandbox containers use 8000.
 Startup:
   1. Run pending Alembic migrations (if AUTO_MIGRATE=true)
   2. Bootstrap default user if none exists
-  3. Verify sandbox image is present (warn loudly if not)
+  3. Fail any run left in-flight by a previous process (no orphans)
+  4. Verify sandbox image is present (warn loudly if not)
 """
 from __future__ import annotations
 
@@ -23,13 +24,21 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import automations, credentials, mcp, oauth, plans, runs, sandbox_frontdoor, sandbox_llm
+from app.api import (
+    auth_routes,
+    automations,
+    credentials,
+    mcp,
+    oauth,
+    plans,
+    runs,
+    sandbox_frontdoor,
+    sandbox_llm,
+    videos,
+)
 from app.config import get_settings
 from app.db.base import close_engine, get_sessionmaker
 from app.db.models import User
-from app.api import automations, credentials, mcp, oauth, plans, runs, sandbox_frontdoor, sandbox_llm, auth_routes
-from fastapi.middleware.cors import CORSMiddleware
-
 
 logging.basicConfig(
     level=logging.INFO,
@@ -108,20 +117,47 @@ async def _run_migrations() -> None:
         raise RuntimeError(f"Alembic migrations failed (exit {proc.returncode})")
     log.info("Migrations up to date")
 
+
 async def _ensure_default_user() -> None:
+    """Seed the single-user-mode default User row if the migration did not.
+
+    The row MUST carry an email: the auth store converts ORM users to the
+    Pydantic User (EmailStr), and a NULL email breaks every authenticated
+    route for that user. Migration 0004 seeds the same address.
+    """
     settings = get_settings()
     async with get_sessionmaker()() as session:
         existing = await session.get(User, settings.default_user_id)
         if existing is None:
             session.add(User(
                 id=settings.default_user_id,
-                email=None, name="Local Dev User", is_active=True,
+                email="dev@local.dev", name="Local Dev User", is_active=True,
             ))
             await session.commit()
             log.info("Created default user: %s", settings.default_user_id)
+        elif not existing.email:
+            # Repair a row seeded before the email requirement was enforced.
+            existing.email = "dev@local.dev"
+            await session.commit()
+            log.info("Backfilled email on default user: %s", settings.default_user_id)
+
+
+async def _fail_orphaned_runs() -> None:
+    """Mark runs left mid-flight by a previous process as FAILED.
+
+    Runs execute as in-process background tasks, so a restart (or crash)
+    abandons anything in PROVISIONING/RUNNING: the container is gone but the
+    row would poll forever. Closing them at startup keeps run state honest.
+    """
+    from app.services.run_control import fail_orphaned_runs
+
+    count = await fail_orphaned_runs()
+    if count:
+        log.warning("Marked %d orphaned run(s) as failed (backend restarted mid-run)", count)
 
 
 def _check_sandbox_image() -> None:
+    """Warn at startup if the local_docker sandbox image is not built."""
     settings = get_settings()
     if settings.sandbox_runner != "local_docker":
         return
@@ -138,6 +174,7 @@ def _check_sandbox_image() -> None:
 
 
 def _check_vault_key() -> None:
+    """Warn at startup if VAULT_ENCRYPTION_KEY is unset (credentials will fail)."""
     settings = get_settings()
     if not settings.vault_encryption_key:
         log.warning(
@@ -149,11 +186,14 @@ def _check_vault_key() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """Startup: migrate DB, seed default user, close orphaned runs, sanity-check
+    env. Shutdown: dispose the engine."""
     settings = get_settings()
     _check_vault_key()
     if settings.auto_migrate:
-       await _run_migrations()
+        await _run_migrations()
     await _ensure_default_user()
+    await _fail_orphaned_runs()
     _check_sandbox_image()
     log.info(
         "Backend up. llm=%s sandbox=%s db=%s",
@@ -165,19 +205,25 @@ async def lifespan(app: FastAPI):
 
 
 def create_app() -> FastAPI:
+    """Build the FastAPI app: one CORS layer, every router mounted once."""
+    settings = get_settings()
     app = FastAPI(title="AI Agent Platform Backend", version="0.2.0", lifespan=lifespan)
 
+    # Explicit origins (never "*") because allow_credentials=True is required
+    # for the httpOnly session cookie to travel with dashboard requests.
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:3000", "http://localhost:5173"],
+        allow_origins=settings.cors_origin_list(),
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
 
+    app.include_router(auth_routes.router)
     app.include_router(plans.router)
     app.include_router(automations.router)
     app.include_router(runs.router)
+    app.include_router(videos.router)
     app.include_router(credentials.router)
     app.include_router(oauth.router)
     app.include_router(mcp.router)
@@ -199,15 +245,6 @@ def create_app() -> FastAPI:
 
 app = create_app()
 
-app.include_router(auth_routes.router)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:3000"],  # explicit, NOT "*"
-    allow_credentials=True,                    # REQUIRED for the session cookie
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 if __name__ == "__main__":
     import uvicorn

@@ -123,6 +123,29 @@ def _blank_png(w=1440, h=900):
     return buf.getvalue()
 
 
+# annotate_screenshot deliberately halves the image and re-encodes it as JPEG
+# (q=85) before returning: it cuts transfer size ~15x with no visible UI loss.
+# So a mark drawn at CSS (x, y) lands at (x/2, y/2) in the output, and JPEG is
+# lossy — "was something drawn here" must be a tolerance check, not equality.
+OUTPUT_SCALE = 0.5
+_NEAR_WHITE = 245
+
+
+def _is_marked(img, x: float, y: float, *, radius: int = 3) -> bool:
+    """True if any pixel within `radius` of the output point is non-white.
+
+    Samples a small neighborhood because JPEG smears a 2px border across
+    adjacent pixels, and the downscale can land the border a pixel either way.
+    """
+    for dx in range(-radius, radius + 1):
+        for dy in range(-radius, radius + 1):
+            px, py = int(x + dx), int(y + dy)
+            if 0 <= px < img.width and 0 <= py < img.height:
+                if any(c < _NEAR_WHITE for c in img.getpixel((px, py))[:3]):
+                    return True
+    return False
+
+
 def test_annotation_draws_marks():
     from PIL import Image
     png = _blank_png()
@@ -134,12 +157,9 @@ def test_annotation_draws_marks():
     out = annotate_screenshot(png, g)
     assert out != png, "annotated image must differ from blank input"
     img = Image.open(io.BytesIO(out))
-    # The blue box edge pixel for element 0 should no longer be white.
-    px = img.getpixel((100, 100))
-    assert px != (255, 255, 255), f"expected drawn border at (100,100), got {px}"
-    # Dialog element border is the red-ish color.
-    px2 = img.getpixel((400, 300))
-    assert px2 != (255, 255, 255)
+    # Output is half-size, so a CSS-space corner maps to half its coordinates.
+    assert _is_marked(img, 100 * OUTPUT_SCALE, 100 * OUTPUT_SCALE), "expected a mark on element 0"
+    assert _is_marked(img, 400 * OUTPUT_SCALE, 300 * OUTPUT_SCALE), "expected a mark on the dialog element"
     print("  SoM marks drawn (incl. dialog color)")
 
 
@@ -153,9 +173,9 @@ def test_annotation_skips_offscreen_and_degrades_gracefully():
     out = annotate_screenshot(png, g)
     img = Image.open(io.BytesIO(out))
     # Nothing should be drawn in-frame for an offscreen element; sample a
-    # spread of pixels and require all white.
-    for xy in [(10, 10), (720, 450), (1430, 890)]:
-        assert img.getpixel(xy) == (255, 255, 255)
+    # spread of pixels (in OUTPUT space) and require all of them blank.
+    for xy in [(10, 10), (360, 225), (710, 440)]:
+        assert not _is_marked(img, *xy), f"unexpected mark at {xy}"
     # Garbage input degrades to passthrough, never raises.
     assert annotate_screenshot(b"not a png", g) == b"not a png"
     print("  offscreen unmarked; garbage input passes through")
@@ -171,10 +191,10 @@ def test_annotation_scales_for_retina():
     )
     out = annotate_screenshot(png, g)
     img = Image.open(io.BytesIO(out))
-    # Box should be drawn at 2x: (200, 200), not (100, 100)... the label chip
-    # may cover (200,200); check the right edge midpoint instead.
-    px = img.getpixel((400, 230))  # (100+100)*2, (100+15)*2
-    assert px != (255, 255, 255), f"expected scaled border at 2x, got {px}"
+    # The box is drawn at 2x device scale, then the output is halved again —
+    # so the right-edge midpoint lands back at its CSS coordinates.
+    assert _is_marked(img, (100 + 100) * 2 * OUTPUT_SCALE, (100 + 15) * 2 * OUTPUT_SCALE), \
+        "expected the mark to scale with device pixel ratio"
     print("  marks scale with device pixel ratio")
 
 

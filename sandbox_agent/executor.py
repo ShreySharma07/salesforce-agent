@@ -347,7 +347,7 @@ def _run_loop(
                         return results
                 continue
 
-            result = _run_step(page, llm, body_step, req, variables=variables)
+            result = _run_step_with_retry(page, llm, body_step, req, variables=variables)
 
             # Drain sentinel handling (body_idx == 0):
             if is_drain and body_idx == 0:
@@ -394,12 +394,14 @@ def _run_loop(
             results.append(result)
             variables.update(result.extracted)
 
-            on_fail = (body_step.on_failure or "pause").lower()
+            on_fail = _failure_policy(body_step)
             if result.status == "paused":
                 return results  # always propagate paused
             if result.status == "failed":
-                if on_fail == "continue":
-                    continue  # step says continue despite failure
+                if on_fail == "skip":
+                    continue  # step says proceed despite failure
+                # abort / pause / exhausted-retry all stop this loop; the
+                # caller's policy router decides what it means for the run.
                 abort_loop = True
                 break
 
@@ -407,6 +409,67 @@ def _run_loop(
             return results
 
     return results
+
+
+# ---------------------------------------------------------------------------
+# Failure policy
+# ---------------------------------------------------------------------------
+
+# What a step's on_failure may say, and what the executor does about it.
+#   abort     stop the whole run now
+#   pause     stop and hand off to a human (resumable via POST /runs/{id}/resume)
+#   skip      log it and move to the next step  ("continue" is a legacy alias)
+#   retry     re-attempt the step, then fall back to `pause` if it fails again
+_RETRY_POLICY = "retry"
+_MAX_STEP_ATTEMPTS = 2   # one original attempt + one retry
+
+
+def _failure_policy(step: Step) -> str:
+    """Normalize a step's on_failure into one of abort/pause/skip/retry.
+
+    An unrecognized value is treated as `pause`: stopping for a human is the
+    safe default when a plan asks for something the executor cannot honor.
+    """
+    policy = (step.on_failure or "pause").strip().lower()
+    if policy == "continue":
+        return "skip"          # legacy alias kept working
+    if policy in ("abort", "pause", "skip", _RETRY_POLICY):
+        return policy
+    log.warning("step %s has unknown on_failure=%r — treating as 'pause'",
+                step.id, step.on_failure)
+    return "pause"
+
+
+def _run_step_with_retry(
+    page: "Page", llm: "GeminiClient", step: Step, req: "RunRequest",
+    *, variables: dict[str, Any], prev_context: str = "",
+) -> StepResult:
+    """Execute one step, honoring an on_failure="retry" policy.
+
+    A retried step is re-attempted from scratch; because state-changing steps
+    carry a success_condition, a retry after a partial success self-skips
+    rather than duplicating work. `attempts` records what actually happened,
+    and the step's wall-clock bounds cover every attempt.
+    """
+    started = datetime.datetime.utcnow()
+    policy = _failure_policy(step)
+    max_attempts = _MAX_STEP_ATTEMPTS if policy == _RETRY_POLICY else 1
+
+    result = None
+    for attempt in range(1, max_attempts + 1):
+        result = _run_step(page, llm, step, req, variables=variables,
+                           prev_context=prev_context)
+        result.attempts = attempt
+        if result.status != "failed" or attempt == max_attempts:
+            break
+        if getattr(result, "quota_exhausted", False):
+            break  # no budget left; retrying cannot help
+        log.warning("step %s failed (attempt %d/%d), retrying: %s",
+                    step.id, attempt, max_attempts, (result.detail or "")[:200])
+
+    result.started_at = started.isoformat()
+    result.finished_at = datetime.datetime.utcnow().isoformat()
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -481,7 +544,14 @@ def run_plan(req: RunRequest) -> RunResponse:
                     child_ids.update(s.details.get("if_false", []))
                 elif s.kind == StepKind.LOOP:
                     child_ids.update(s.details.get("body", []))
-            variables: dict[str, Any] = {}
+            # Resume support: a run restarted from a paused step inherits that
+            # run's collected variables and skips everything before it.
+            variables: dict[str, Any] = dict(req.initial_variables or {})
+            resume_pending = bool(req.start_at_step_id)
+            if resume_pending and req.start_at_step_id not in step_by_id:
+                return _finish("failed", step_results, page,
+                               f"resume target step {req.start_at_step_id!r} is not in this plan",
+                               started)
             step_count = 0
             # Carry the last step's final observation forward so the next step's
             # ReAct loop knows what page state was left — avoids re-exploring
@@ -489,6 +559,12 @@ def run_plan(req: RunRequest) -> RunResponse:
             prev_step_context: str = ""
 
             for step in req.plan.steps:
+                if resume_pending:
+                    # Fast-forward to the step the paused run stopped on.
+                    if step.id != req.start_at_step_id:
+                        continue
+                    resume_pending = False
+                    log.info("resuming plan %s at step %s", req.plan.id, step.id)
                 if step.id in child_ids:
                     continue  # handled by its DECISION/LOOP parent
                 if step_count >= req.max_steps:
@@ -501,8 +577,8 @@ def run_plan(req: RunRequest) -> RunResponse:
                 elif step.kind == StepKind.LOOP:
                     new_results = _run_loop(step, step_by_id, page, llm, req, variables)
                 else:
-                    result = _run_step(page, llm, step, req, variables=variables,
-                                       prev_context=prev_step_context)
+                    result = _run_step_with_retry(page, llm, step, req, variables=variables,
+                                                  prev_context=prev_step_context)
                     variables.update(result.extracted)
                     new_results = [result]
 
@@ -538,16 +614,20 @@ def run_plan(req: RunRequest) -> RunResponse:
                                        started)
                     if result.status == "failed":
                         src = step_by_id.get(result.step_id, step)
-                        policy = (src.on_failure or "pause").lower()
+                        policy = _failure_policy(src)
                         if policy == "abort":
                             return _finish("failed", step_results, page,
                                            f"step {result.step_id} failed (abort): {result.detail}",
                                            started)
-                        if policy == "pause":
+                        if policy in ("pause", _RETRY_POLICY):
+                            # `retry` already re-attempted inside the step
+                            # runner; exhausting it pauses for a human.
                             return _finish("paused", step_results, page,
                                            f"step {result.step_id} failed (pausing for review): {result.detail}",
                                            started)
-                        # policy == "continue": log and proceed
+                        # policy == "skip": log and proceed
+                        log.warning("step %s failed; on_failure=skip so continuing: %s",
+                                    result.step_id, (result.detail or "")[:200])
 
             return _finish("completed", step_results, page, None, started)
 
@@ -667,7 +747,13 @@ def _run_step(page: Page, llm: GeminiClient, step: Step, req: RunRequest, *, var
         import traceback
         server = step.details.get("server", "")
         tool = step.details.get("tool", "")
-        args = step.details.get("args") or {}
+        # The Plan schema and the plan generator both emit "arguments";
+        # hand-written plans have historically used "args". Accept either so
+        # a generated mcp_call step does not silently ship an empty payload.
+        args = step.details.get("arguments")
+        if args is None:
+            args = step.details.get("args")
+        args = args or {}
         variable_name = step.details.get("variable_name") or "result"
         try:
             from sandbox_agent.mcp_client import MCPClient

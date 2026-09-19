@@ -79,6 +79,12 @@ class RunRequest(BaseModel):
     )
     max_steps: int = 50
     max_seconds: int = 600
+    # Resume support: begin the linear walk at this step id instead of the
+    # first step, seeding `variables` with what the paused run had collected.
+    # Steps before it are skipped entirely (their success_conditions already
+    # hold), so a resumed run picks up exactly where the paused one stopped.
+    start_at_step_id: str | None = None
+    initial_variables: dict[str, Any] = Field(default_factory=dict)
     # Phase 2b: per-step ReAct budget. A UI step's loop runs at most this
     # many Reason->Act->Observe iterations before being marked failed.
     max_iterations_per_step: int = 70
@@ -119,6 +125,13 @@ class StepResult(BaseModel):
     # True if this step failed because the LLM daily quota was exhausted.
     # The executor uses this to abort the whole run (no point continuing).
     quota_exhausted: bool = False
+    # Real wall-clock bounds for this step, as ISO-8601 UTC strings. The
+    # backend stores these on StepExecution instead of estimating them by
+    # dividing the run's elapsed time evenly across steps.
+    started_at: str | None = None
+    finished_at: str | None = None
+    # How many times the step was attempted (>1 when on_failure="retry").
+    attempts: int = 1
 
 
 class RunResponse(BaseModel):

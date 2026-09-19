@@ -139,12 +139,16 @@ class LocalDockerRunner(SandboxRunner):
         max_steps: int = 50,
         max_seconds: int = 600,
         memory_hints: dict[str, str] | None = None,
+        start_at_step_id: str | None = None,
+        initial_variables: dict | None = None,
     ) -> dict:
         body = {
             "plan": plan_dict,
             "max_steps": max_steps,
             "max_seconds": max_seconds,
             "memory_hints": memory_hints or {},
+            "start_at_step_id": start_at_step_id,
+            "initial_variables": initial_variables or {},
         }
         # The executor checks the run budget BETWEEN steps, not during one.
         # A single step can consume its own per-step budget (≤ 600s by default)

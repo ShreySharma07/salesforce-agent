@@ -54,14 +54,21 @@ class Repository(ABC):
 
 
 def _json(obj) -> dict:
+    """Serialize a Pydantic model to a JSON-safe dict for the payload column."""
     return obj.model_dump(mode="json")
 
 
 def _enum_str(value) -> str:
+    """Store enums as their string value so the column is queryable on any DB."""
     return value.value if hasattr(value, "value") else str(value)
 
 
 class SqlRepo(Repository):
+    """SQLAlchemy-backed repository. Each method opens its own short-lived session.
+
+    Rows keep the full Pydantic payload as JSON plus a few indexed columns;
+    reads always rebuild the Pydantic object from `payload`."""
+
     async def save_plan(self, plan: Plan, *, user_id: str | None = None) -> None:
         owner = user_id or get_settings().default_user_id
         async with get_sessionmaker()() as session:
@@ -214,6 +221,7 @@ _repo: SqlRepo | None = None
 
 
 def get_repository() -> Repository:
+    """Process-wide repository singleton."""
     global _repo
     if _repo is None:
         _repo = SqlRepo()

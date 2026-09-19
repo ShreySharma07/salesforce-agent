@@ -27,7 +27,6 @@ key comes from backend settings (env / .env on the backend only).
 from __future__ import annotations
 
 import base64
-import hashlib
 import logging
 import re
 import time
@@ -37,6 +36,7 @@ from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
 
 from app.config import get_settings
+from app.core.budget import get_budget_tracker
 from app.services.run_repo import get_repository
 
 
@@ -66,33 +66,26 @@ class LLMGenerateResponse(BaseModel):
     input_tokens: int = 0
     output_tokens: int = 0
     latency_ms: int = 0
+    # Which model actually served the call (for per-run cost accounting).
+    model: str = ""
     error: str | None = None
     # True when the failure is daily-quota exhaustion — signals the sandbox
     # to abort the whole run rather than retry or continue.
     quota_exhausted: bool = False
+    # True when the RUN's own call/dollar budget is spent. Also terminal:
+    # the sandbox aborts rather than retrying (the ceiling will not move).
+    budget_exceeded: bool = False
 
 
 # ---------------------------------------------------------------------------
 # Run-token validation (shared shape with /mcp)
 # ---------------------------------------------------------------------------
 
-async def _validate_run_token(run_id: str | None, authorization: str | None) -> None:
-    """Reject the call unless the bearer token matches the Run's stored hash.
-    A run with no stored hash (older runs) is allowed through for compatibility,
-    same policy as the /mcp endpoint."""
-    if not run_id:
-        # No run context — allowed only in single-user/testing, same as /mcp.
-        return
-    repo = get_repository()
-    run = await repo.get_run(run_id)
-    if run is None:
-        return
-    if run.mcp_token_hash is not None:
-        token = None
-        if authorization and authorization.startswith("Bearer "):
-            token = authorization.removeprefix("Bearer ")
-        if token is None or hashlib.sha256(token.encode()).hexdigest() != run.mcp_token_hash:
-            raise HTTPException(401, "invalid run token")
+async def _validate_run_token(run_id: str | None, authorization: str | None):
+    """Reject the call unless (run_id, bearer token) matches a Run's stored hash.
+    No anonymous / no-run path: the proxy spends the backend's LLM key."""
+    from app.services.run_auth import authenticate_run
+    return await authenticate_run(run_id, authorization)
 
 
 # ---------------------------------------------------------------------------
@@ -201,7 +194,7 @@ def _gemini_generate(req: LLMGenerateRequest) -> LLMGenerateResponse:
         text = "".join(p.text for p in cand.content.parts if getattr(p, "text", None))
 
     return LLMGenerateResponse(
-        ok=True, text=text,
+        ok=True, text=text, model=model,
         input_tokens=in_tok, output_tokens=out_tok, latency_ms=latency_ms,
     )
 
@@ -303,7 +296,7 @@ def _claude_generate(req: LLMGenerateRequest) -> LLMGenerateResponse:
                 text = m.group(0)
 
     return LLMGenerateResponse(
-        ok=True, text=text,
+        ok=True, text=text, model=model,
         input_tokens=raw.usage.input_tokens,
         output_tokens=raw.usage.output_tokens,
         latency_ms=latency_ms,
@@ -315,23 +308,46 @@ async def generate(
     req: LLMGenerateRequest,
     authorization: str | None = Header(default=None),
 ) -> LLMGenerateResponse:
+    """LLM proxy for the sandbox.
+
+    Validates the per-run token, enforces the run's call/dollar budget, then
+    calls the configured provider in a worker thread with the backend's key.
+    Provider errors come back as ok=False (rather than raised) so the sandbox
+    records them in its trace; quota and budget exhaustion are flagged
+    separately because both are terminal for the run.
+    """
     await _validate_run_token(req.run_id, authorization)
     settings = get_settings()
+
+    # Budget gate: refuse the call BEFORE spending anything.
+    tracker = get_budget_tracker()
+    reason = tracker.check(req.run_id)
+    if reason:
+        log.warning("run %s refused an LLM call: %s", req.run_id, reason)
+        return LLMGenerateResponse(ok=False, error=reason, budget_exceeded=True)
+
     provider = settings.llm_provider
     _fn = _claude_generate if provider == "anthropic" else _gemini_generate
     try:
         # Both generators are sync + blocking; run off the event loop.
         import anyio
-        return await anyio.to_thread.run_sync(_fn, req)
+        result = await anyio.to_thread.run_sync(_fn, req)
     except HTTPException:
         raise
     except QuotaExhaustedError as e:
         # Distinct signal: the run should abort, not retry or continue.
-        return LLMGenerateResponse(
-            ok=False, error=str(e), quota_exhausted=True,
-        )
+        return LLMGenerateResponse(ok=False, error=str(e), quota_exhausted=True)
     except Exception as e:
         # Surface the real error to the sandbox so its trace records it.
-        return LLMGenerateResponse(
-            ok=False, error=f"{type(e).__name__}: {e}",
+        return LLMGenerateResponse(ok=False, error=f"{type(e).__name__}: {e}")
+
+    # Record what this call cost against the run's ledger.
+    spend = tracker.record(
+        req.run_id, model=result.model or settings.llm_model,
+        input_tokens=result.input_tokens, output_tokens=result.output_tokens,
+    )
+    if spend is not None:
+        log.debug(
+            "run %s spend: %d calls, $%.4f", req.run_id, spend.calls, spend.cost_usd,
         )
+    return result

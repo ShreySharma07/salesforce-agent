@@ -93,6 +93,14 @@ class Settings(BaseSettings):
     # ----- Backend HTTP server -----
     backend_host: str = "0.0.0.0"
     backend_port: int = 8001
+    # Comma-separated browser origins allowed to call the API with credentials.
+    # Never "*" — allow_credentials=True requires explicit origins.
+    cors_origins: str = "http://localhost:3000,http://localhost:5173"
+
+    # ----- Run execution limits -----
+    # Concurrent sandboxes this backend will run at once. local_docker maps a
+    # host port per container, so unbounded spawning exhausts ports and RAM.
+    max_concurrent_runs: int = 3
 
     # ----- Default user (single-user mode) -----
     default_user_id: str = "user_local"
@@ -100,8 +108,14 @@ class Settings(BaseSettings):
     auth_dev_mode: bool = True
 
     # ----- Budget defaults -----
+    # Enforced per run by the LLM proxy (app/core/budget). A run that exceeds
+    # either ceiling is refused further model calls and aborts.
     default_max_model_calls_per_run: int = 80000
     default_max_usd_per_run: float = 900.00
+
+    def cors_origin_list(self) -> list[str]:
+        """Parse `cors_origins` into the list CORSMiddleware expects."""
+        return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
 
     def llm_env_for_sandbox(self) -> dict[str, str]:
         # API keys are intentionally NOT forwarded — the sandbox calls the
