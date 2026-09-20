@@ -1,290 +1,108 @@
-# 🤖 AI Work Automation Agent
+# Demonstration-Guided Agentic Automation
 
-> Watch a task once. The agent does it forever — autonomously, in a secure sandbox, reasoning its way through any web UI.
+**Exploring how a narrated screen recording can become a reviewable plan that an agent executes through an application's user interface.**
 
-An autonomous agent platform that turns a **single screen recording** into a repeatable automation. It generates an executable plan, runs it in an isolated cloud sandbox, and uses a **Reason → Act → Observe loop** to perceive a live browser, think through each step, and adapt in real time — the way a person would.
+## The business problem
 
-The first focus is **Salesforce data hygiene** (creating and updating leads/contacts), but nothing about the architecture is Salesforce-specific. It's a general web-task agent.
+Business processes often depend on applications that employees operate manually. Suitable APIs or MCP tools may be unavailable, incomplete, or inaccessible—or may cover only part of the workflow.
 
----
+Employees still need to navigate screens, interpret information, apply business rules, and update records.
 
-## ✨ What makes it different
+This POC explores whether a business user can teach an agent a bounded process by demonstrating it and explaining its intent.
 
-| | |
+## Our hypothesis
+
+A screen recording shows **how the work is performed**. Spoken narration explains **why it is performed**, which records qualify, and what outcome is expected.
+
+Together, these inputs may provide enough context to generate a reusable plan that a user reviews and approves before an agent executes it.
+
+The goal is to move beyond replaying recorded clicks toward completing an intended task against the application's current state.
+
+## How it works
+
+1. **Demonstrate:** Record a business process with spoken explanation.
+2. **Interpret:** Extract visual observations and narration from the recording.
+3. **Plan:** Generate a structured goal, inferred rules, execution steps, and completion conditions.
+4. **Review:** Inspect the plan, correct misunderstandings, and approve it.
+5. **Execute:** Run the approved plan in a browser-based agent environment.
+6. **Verify:** Compare the agent's reported outcome with the actual application state.
+
+The implementation processes audio and sampled video frames in stages. It does not send the entire recording through one model call.
+
+## Why UI-based execution?
+
+The main experiment tests automation where suitable application integrations are unavailable.
+
+The agent performs business operations through the application interface: opening records, editing fields, submitting forms, and checking results.
+
+Model APIs support interpretation and reasoning, and backend services coordinate execution and authentication. Application-specific APIs or MCP tools do not perform the business operations in the selected experiment.
+
+The codebase also contains direct tool-call capabilities. Those are outside the scope of this UI-based experiment.
+
+## Architecture
+
+| Component | Responsibility |
 |---|---|
-| 🎥 **Learns by watching** | Record yourself once. No scripting, no selectors, no brittle macros. |
-| 🧠 **Genuinely agentic** | A ReAct loop reasons over live screenshots and adapts — it doesn't replay fixed clicks. |
-| ⚡ **Deterministic where it counts** | Well-understood UI patterns run as `sequence` steps — no LLM in the loop, ~5–7× faster and rock-solid. |
-| 📈 **Gets better every run** | Procedural + episodic memory primes each run with what worked (and what didn't) last time. |
-| 🔒 **Zero-trust by design** | The sandbox that touches the web **never holds a credential or API key.** Ever. |
-| 👁️ **Watchable & auditable** | Watch runs live; every run keeps a full step-by-step reasoning trace. |
-| 🔌 **Connected apps, on demand** | The agent decides *when* it needs Salesforce and logs in itself — via a one-time token, never a password. |
+| User interface | Present plans for review and provide access to the available application screens. The complete self-service journey is still being developed. |
+| Processing and coordination backend | Ingest recordings, invoke models, generate and store plans, handle approval, and manage runs. |
+| Agent sandbox | Operate Chromium using deterministic action sequences and model-guided browser interaction. |
+| Execution records and memory | Store outcomes and traces, and retrieve relevant hints from prior runs. |
 
----
+Long-lived provider credentials and model API keys are managed by the backend. The sandbox receives a run token and can hold an authenticated browser session. These boundaries require further hardening before remote hosting.
 
-## 🎯 How it works, in five steps
+For Salesforce, the **Single-Access UI Bridge** uses the connected business user's OAuth identity and a Salesforce-generated Frontdoor URL to establish the browser session. Business actions remain UI-based. This is our architectural name for the pattern, not Salesforce's official feature name. See the implementation architecture for details.
 
-```
-   1. RECORD              2. PLAN                3. RUN
-   ┌─────────┐          ┌─────────┐           ┌──────────────┐
-   │ screen  │  ──────▶ │ executable │ ──────▶ │ isolated      │
-   │ recording│         │ plan       │         │ sandbox       │
-   └─────────┘          └─────────┘           └──────────────┘
-                                                      │
-   5. INSPECT            4. WATCH                      ▼
-   ┌─────────────┐      ┌─────────────┐         ┌──────────────┐
-   │ full reasoning│ ◀── │ live browser │ ◀────── │ ReAct agent   │
-   │ trace + cost  │     │ view (noVNC) │         │ drives the UI │
-   └─────────────┘      └─────────────┘         └──────────────┘
-```
+## Initial experiment
 
-1. **Record** a screen capture of the task once.
-2. The platform turns it into a structured **Plan** (FFmpeg keyframes → vision-LLM captions → plan synthesis).
-3. You trigger it; the backend **primes the run from memory**, then a **fresh Docker sandbox** spawns and executes the plan autonomously.
-4. **Watch it work live** in your browser.
-5. **Inspect** the full Reason → Act → Observe trace afterward — every thought, action, and observation. The backend **reflects on the run** so the next one starts smarter.
+The proposed validation workflow uses a Salesforce test environment:
 
----
+- Identify cases that meet a stated eligibility rule.
+- Update eligible cases to Escalated.
+- Create a follow-up task when an equivalent task does not already exist.
+- Leave excluded cases unchanged.
+- Surface missing information or ambiguity.
 
-## 🏛️ Architecture in one picture
+Validation includes a different eligible record, a duplicate-prevention rerun, and an exception case.
 
-Two processes, one hard security boundary:
+Salesforce is the initial test environment. Broader application compatibility has not been established.
 
-```
-   You / CLI
-      │
-      ▼
- ┌────────────────────────────────────────────┐
- │  🧠 BACKEND  — holds ALL secrets            │
- │     • API layer        • credential vault   │
- │     • video→plan       • OAuth + frontdoor  │
- │     • LLM proxy        • sandbox runner     │
- │     • database (SQLite / Postgres)          │
- └────────────────────────────────────────────┘
-      │  spawns + sends Plan      ▲  LLM & tool calls
-      ▼  (scoped per-run token)   │  (no secrets travel down)
- ┌────────────────────────────────────────────┐
- │  🦾 SANDBOX — Docker, one per run           │
- │     • executor → ReAct loop → Chromium      │
- │     • holds ONLY a per-run token            │
- └────────────────────────────────────────────┘
-      │
-      ▼
-   🌐 Gemini   ☁️ Salesforce
-```
+## Current status
 
-**The backend is the brain and the vault. The sandbox is the hands.** The hands never hold the keys.
+**Experimental POC under validation.**
 
-Two security properties this guarantees:
+The reviewed implementation includes recording processing, plan generation and correction, approval, on-demand browser execution, and execution traces.
 
-- 🔑 **The LLM API key never enters the sandbox.** All model calls are proxied through the backend.
-- 🎫 **The Salesforce token never enters the sandbox.** The agent logs in via Salesforce's `singleaccess` endpoint, which mints a **one-time login URL** on the backend — the real token stays locked in the vault.
+Current limitations include:
 
-Full design: see [`Architecture.md`](./Architecture.md).
+- An incomplete end-to-end business-user interface.
+- Manual run initiation; scheduling and event triggers remain future work.
+- Recovery and outcome-verification paths that need additional validation.
+- A simulated `notify` step.
+- Local Docker execution; cloud runner implementations are stubs.
+- Security hardening required before remotely accessible deployment.
 
----
+No general reliability, performance, or production-readiness claims are made. This description is based on the supplied source snapshot; maintainers should reconcile it with subsequent implementation changes before publication.
 
-## 🚀 Quick start
+## Evaluation
 
-### Prerequisites
+We evaluate correct business outcomes, excluded records left unchanged, duplicate prevention, human interventions, elapsed time, and model usage.
 
-- **Python 3.12**
-- **Docker Desktop** (running)
-- **ffmpeg** — `brew install ffmpeg`
-- A **Google Gemini API key** ([aistudio.google.com](https://aistudio.google.com)) — *billing recommended; the free tier caps at 20 calls/day per project*
-- *(optional)* a **Salesforce org** you control — a free [Developer Edition](https://developer.salesforce.com/signup) works perfectly
+A run is not considered successful solely because the agent reports completion. Results must be checked against application state.
 
-### 1 · Install
+Measured results and a demonstration will be added after validation.
 
-```bash
-git clone <your-repo-url> salesforce-agent
-cd salesforce-agent/backend
-python3.12 -m venv .venv && source .venv/bin/activate
-pip install -e .
-```
+## Documentation
 
-### 2 · Configure `backend/.env`
+- [Business problem and design](docs/recording-to-automation-design.md)
+- [POC validation plan](docs/poc-acceptance-plan.md)
+- [Implementation architecture](Architecture.md)
+- [Existing development instructions — pending revalidation](docs/development-setup.md)
 
-```bash
-cp .env.example .env
-```
+## Contributors
 
-```ini
-GEMINI_API_KEY=<your key>
-LLM_PROVIDER=gemini
-LLM_MODEL=gemini-3.1-pro-preview     # the backend proxies all model calls; the sandbox never sees the key
+Proposed attribution for confirmation before publication:
 
-# generate: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-VAULT_ENCRYPTION_KEY=<generated key>
+- **Sumit Paliwal (@supaliwa):** Original automation concept, business problem framing, and POC design and evaluation documentation.
+- **Shrey (@ShreySharma07):** Implementation and engineering development.
 
-PUBLIC_BACKEND_BASE_URL=http://localhost:8001
-```
-
-> 💡 The ReAct loop is the run's cost center. For faster/cheaper runs, point
-> `LLM_MODEL` at a Flash-class model — the loop is mostly mechanical clicks and
-> fills that don't need a heavyweight reasoning model.
-
-> ⚠️ **Don't also `export GEMINI_API_KEY` in your shell.** A shell variable overrides `.env` and causes "wrong key" confusion. Keep it only in `.env`.
-
-### 3 · Build the sandbox image
-
-```bash
-cd ..                       # repo root
-docker build -t agent-sandbox:latest -f sandbox/Dockerfile .
-docker image inspect agent-sandbox:latest >/dev/null 2>&1 && echo "✅ FOUND" || echo "❌ MISSING"
-```
-
-### 4 · Run the backend
-
-```bash
-cd backend
-python -m app.main
-# → "Backend up." on http://localhost:8001
-curl -s http://localhost:8001/health | python -m json.tool   # vault_configured: true
-```
-
-### 5 · Turn a recording into a plan
-
-```bash
-# upload → returns {"video_id": "...", "status": "uploaded"}
-curl -s -F "file=@recording.mp4" http://localhost:8001/videos | python -m json.tool
-
-# poll until status is "completed" and plan_id is set
-curl -s http://localhost:8001/videos/<video_id> | python -m json.tool
-
-# review it, then approve
-curl -s http://localhost:8001/plans/<plan_id> | python -m json.tool
-curl -s -X POST http://localhost:8001/plans/<plan_id>/approve
-```
-
-A plan lands as `pending_approval` — nothing runs until a human approves it.
-To reshape it, describe the change in plain language:
-`POST /plans/<plan_id>/correct  {"feedback": "do this for every new case, not just 00001378"}`.
-
-### 6 · Run a demo (no credentials needed)
-
-```bash
-python -m scripts.run_plan_e2e .local_storage/plans/plan_arxiv_demo.json --watch
-```
-
-Open the printed `watch:` URL to see the agent live. When it finishes:
-
-```bash
-curl -s http://localhost:8001/runs/<run_id> | python -m json.tool
-#   → step_executions[].trace shows the agent's reasoning, step by step
-```
-
----
-
-## 🔗 Connect Salesforce *(optional, one-time)*
-
-A one-time account connection — afterward the platform keeps the token fresh automatically.
-
-1. **Create a Connected App** in your Salesforce org (Setup → App Manager → New Connected App):
-   - Enable OAuth Settings
-   - Callback URL: `http://localhost:8001/oauth/salesforce/callback`
-   - Scopes: **Full access (full)**, **Manage user data via APIs (api)**, **Perform requests at any time (refresh_token, offline_access)**
-   - Save, then **wait ~10 min** for it to propagate
-2. Copy the **Consumer Key + Secret** into `.env` (`SALESFORCE_CLIENT_ID`, `SALESFORCE_CLIENT_SECRET`), keep `SALESFORCE_AUTH_URL=https://login.salesforce.com`, restart the backend.
-3. **Connect:** open `http://localhost:8001/oauth/salesforce/connect` in a browser → log in → Allow → green ✅ page.
-4. **Verify:** `curl -s http://localhost:8001/oauth/providers` → salesforce `"connected": true`.
-
-The token is now encrypted in the vault. From here on, any plan that needs Salesforce just works — the agent logs itself in on demand via a one-time URL, never touching the token.
-
----
-
-## 🗂️ Project layout
-
-```
-salesforce-agent/
-├── backend/
-│   └── app/
-│       ├── main.py          # FastAPI app; migrations on startup
-│       ├── config.py        # all settings, from environment
-│       ├── api/             # HTTP endpoints (plans, automations, runs,
-│       │                    #   oauth, mcp, sandbox_llm, sandbox_frontdoor)
-│       ├── agent/           # video → plan pipeline
-│       ├── core/            # guardrails, budgets, prompts, LLM factory
-│       ├── services/        # vault, oauth, mcp, memory, sandbox runner
-│       ├── db/              # SQLAlchemy models + migrations
-│       └── schemas/         # Pydantic contracts
-├── frontend/                # Next.js dashboard (upload · plan · run · history)
-├── sandbox/                 # Docker image definition
-└── sandbox_agent/           # code that runs INSIDE the container
-    ├── executor.py          # walks the Plan; sequence + ReAct dispatch
-    ├── browser_mode.py      # ReAct loop + sequence sub-action primitives
-    ├── grounding.py         # screenshot annotation + DOM extraction
-    ├── llm_client.py        # → backend LLM proxy (no key here)
-    └── mcp_client.py        # → backend MCP endpoint
-```
-
-> **Plan steps come in two flavors:** deterministic `sequence` steps (ordered
-> sub-actions like `click_pencil_icon` → `fill_field` → `click_dropdown_result`,
-> run with no LLM) and agentic `ui_action`/`extract` steps (handed to the ReAct
-> loop). Prefer `sequence` for known UI patterns — it's faster and never wanders.
-
----
-
-## 🛠️ Everyday commands
-
-```bash
-# start backend (shell where GEMINI_API_KEY is NOT exported)
-python -m app.main
-
-# free port 8001 if a stale backend holds it
-lsof -ti:8001 | xargs kill -9
-
-# rebuild sandbox image — REQUIRED after editing anything in sandbox_agent/
-docker build --no-cache -t agent-sandbox:latest -f sandbox/Dockerfile .
-
-# run a plan with live view
-python -m scripts.run_plan_e2e .local_storage/plans/<plan>.json --watch
-
-# inspect a run + its reasoning trace
-curl -s http://localhost:8001/runs/<run_id> | python -m json.tool
-```
-
----
-
-## 🩹 Troubleshooting
-
-| Symptom | Cause & fix |
-|---|---|
-| `address already in use` on startup | Stale backend holds the port → `lsof -ti:8001 \| xargs kill -9`, restart. |
-| Wrong / old Gemini key used | `GEMINI_API_KEY` exported in your shell overrides `.env` → remove from `~/.zshrc`, fresh terminal (`echo $GEMINI_API_KEY` blank), restart. |
-| `Sandbox image not found` | Image misnamed or backend started before build → `docker image inspect agent-sandbox:latest`; re-tag/rebuild, restart. |
-| `sandbox_agent/` edits do nothing | You must **rebuild the image**. Backend = restart; sandbox = rebuild. |
-| "Salesforce not connected" despite being connected | Source of truth is the **SQLite DB**, not the `.local_storage/*.json` files. Check via the API, not the files. |
-| Runs abort with "quota exhausted" | Free Gemini tier = 20 calls/day **per project**. A multi-step run exhausts it. Enable billing. |
-
----
-
-## 📍 Status
-
-**✅ Built & verified**
-- Video → plan pipeline (keyframes · narration · captions · plan synthesis)
-- Executor with two step engines: deterministic `sequence` steps + agentic ReAct loop
-- Full reasoning trace + cost tracking per run
-- Per-step idempotency via `success_condition`; drain-the-queue loops
-- Learning loop — procedural + episodic memory primes each run; reflection after
-- Isolated Docker sandbox with live (noVNC) view
-- LLM proxy — sandbox holds no API key
-- Per-run token auth for every sandbox → backend call
-- Encrypted credential vault + OAuth (Salesforce)
-- `singleaccess` FrontDoor — one-time login URL, token never leaves the backend
-- **Agent-initiated `open_app`** — logs into a connected app lazily, mid-task
-- Quota circuit-breaker + per-run call/dollar budget — fails fast & clean
-- Plan guardrails — an invalid or unapproved plan can never reach a sandbox
-- Executor honors per-step `on_failure` (`abort` / `pause` / `skip` / `retry`)
-- Resumable pauses — answer a stuck run and it continues from that step
-- Per-user scoping on every route; credentials and runs are never shared
-- `POST /videos` — upload a recording and poll it into a Plan
-- End-to-end Salesforce run verified (contact update · status escalation · task creation)
-- Next.js dashboard (upload · plan review · live run · history)
-
-**🗺️ Roadmap**
-- Durable run queue — execution is in-process today, so runs don't survive a restart
-- Cloud sandbox runners (Modal / Fargate are interface stubs today)
-- Embedding-based memory retrieval on top of keyword signatures
-- Run-speed pass — move more steps to `sequence`, trim per-observe waits
-- Scheduling & triggers
+These descriptions recognize project roles; GitHub's automatically generated contributor list reflects attributed repository commits.
