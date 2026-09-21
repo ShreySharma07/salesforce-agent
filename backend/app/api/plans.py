@@ -21,9 +21,10 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from app.api.deps import get_scoped_repo_dep
+from app.api.deps import get_current_user, get_scoped_repo_dep
 from app.config import get_settings
 from app.core.guardrails import PlanValidationError, validate_plan
+from app.schemas.auth import User
 from app.schemas.plan import Plan, PlanStatus
 from app.services.scoping import ScopedRepo
 
@@ -58,8 +59,19 @@ async def upsert_plan(plan: Plan, repo: ScopedRepo = Depends(get_scoped_repo_dep
     report = validate_plan(plan)
     if report.errors:
         raise HTTPException(422, {"message": "plan failed validation", "errors": report.errors})
-    await repo.save_plan(plan)
+
     existing = await repo.get_plan(plan.id)
+
+    # Approval state is SERVER-CONTROLLED and is never accepted from the
+    # client. Otherwise anyone could POST a plan with status="approved" and
+    # skip human review entirely. Any write puts the plan back into review,
+    # because the steps may have changed since it was last approved — an old
+    # approval must never cover new content.
+    plan.status = PlanStatus.PENDING_APPROVAL
+    plan.approved_at = None
+    plan.approved_by = None
+
+    await repo.save_plan(plan)
     return UpsertPlanResponse(
         plan=plan, created=existing is None, warnings=report.warnings,
     )
@@ -75,11 +87,17 @@ async def get_plan(plan_id: str, repo: ScopedRepo = Depends(get_scoped_repo_dep)
 
 
 @router.post("/{plan_id}/approve", response_model=Plan)
-async def approve_plan(plan_id: str, repo: ScopedRepo = Depends(get_scoped_repo_dep)):
+async def approve_plan(plan_id: str,
+                       user: User = Depends(get_current_user),
+                       repo: ScopedRepo = Depends(get_scoped_repo_dep)):
     """Mark a plan APPROVED so it can be wrapped in an Automation and run.
 
     Approval is the last gate before a plan drives a real browser, so the
-    guardrails run here too — an invalid plan can never reach a sandbox.
+    guardrails run here too: an invalid plan can never reach a sandbox.
+
+    The approver's identity and the approval time are recorded from the
+    authenticated session, never from the request body, so the audit trail
+    cannot be forged by the client.
     """
     plan = await repo.get_plan(plan_id)
     if plan is None:
@@ -89,7 +107,9 @@ async def approve_plan(plan_id: str, repo: ScopedRepo = Depends(get_scoped_repo_
         raise HTTPException(422, {"message": "plan failed validation", "errors": report.errors})
     plan.status = PlanStatus.APPROVED
     plan.approved_at = datetime.utcnow()
+    plan.approved_by = user.id
     await repo.save_plan(plan)
+    log.info("plan %s v%d approved by %s", plan.id, plan.version, user.id)
     return plan
 
 

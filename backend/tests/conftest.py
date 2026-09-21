@@ -32,8 +32,25 @@ for path in (str(REPO_ROOT), str(BACKEND_DIR)):
         sys.path.insert(0, path)
 
 
+def _detach_from_developer_dotenv() -> None:
+    """Stop Settings reading the developer's real `backend/.env`.
+
+    pydantic-settings resolves a field from init kwargs, then the process
+    environment, then the .env FILE. So a field a test does not set explicitly
+    silently inherits whatever that developer happens to have configured, and
+    the suite starts passing or failing depending on whose laptop it runs on.
+    Pointing env_file at a path that cannot exist makes every test hermetic.
+    """
+    from app.config import Settings
+
+    Settings.model_config["env_file"] = str(
+        Path(tempfile.gettempdir()) / "agent-tests-no-such.env"
+    )
+
+
 def _isolate_environment() -> None:
     """Point the whole test session at a throwaway DB, storage root and LLM."""
+    _detach_from_developer_dotenv()
     tmp = tempfile.mkdtemp(prefix="agent_tests_")
     os.environ["LLM_PROVIDER"] = "mock"
     os.environ["LLM_MODEL"] = "mock-model"

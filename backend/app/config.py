@@ -46,8 +46,38 @@ class Settings(BaseSettings):
     )
 
     # ----- LLM provider -----
+    # Two DIFFERENT jobs, so they can use two different models.
+    #
+    #   llm_provider / llm_model
+    #       The backend pipeline: keyframe captioning and plan synthesis.
+    #       One long, vision-heavy call per batch of frames, run once per
+    #       recording. Gemini is cheap and fast at this.
+    #
+    #   sandbox_llm_provider / sandbox_llm_model
+    #       The ReAct loop inside the sandbox: many small screenshot +
+    #       reason + act calls, every one of which must return valid JSON and
+    #       follow a long list of rules. This is where model quality shows up
+    #       most, and it is the run's cost centre.
+    #
+    # Leave the sandbox_* values unset to use the same model for both.
     llm_provider: Literal["mock", "gemini", "anthropic", "openai"] = "gemini"
     llm_model: str = "gemini-3.1-pro-preview"
+    sandbox_llm_provider: Literal["mock", "gemini", "anthropic", "openai"] | None = None
+    sandbox_llm_model: str | None = None
+
+    # The pipeline itself has two very different stages, and on a small budget
+    # the difference matters:
+    #
+    #   caption_llm_model  Describing what is on screen, one call per batch of
+    #                      frames. Token-heavy (every frame is an image) but
+    #                      undemanding, so a cheap model does it well.
+    #   plan_llm_model     Turning those descriptions into a structured plan.
+    #                      ONE call, but it must follow a long rule list and
+    #                      emit valid JSON — worth a strong model.
+    #
+    # Both default to llm_model when unset.
+    caption_llm_model: str | None = None
+    plan_llm_model: str | None = None
     gemini_api_key: str | None = None
     anthropic_api_key: str | None = None
     openai_api_key: str | None = None
@@ -60,6 +90,16 @@ class Settings(BaseSettings):
 
     # Optional: live-mount sandbox_agent/ for fast iteration without rebuilding
     sandbox_dev_mount: str | None = None
+    # Host interface the sandbox's agent + noVNC ports are published on.
+    # Defaults to loopback: the sandbox control API and the live view are
+    # UNAUTHENTICATED for viewing, so they must not be reachable from the
+    # network. Only change this if you have put an authenticating proxy in
+    # front of them.
+    sandbox_bind_host: str = "127.0.0.1"
+    # Optional password for the live-view VNC server inside the sandbox.
+    # REQUIRED before exposing the live view beyond loopback: an unauthenticated
+    # VNC session is full keyboard and mouse control of a logged-in browser.
+    sandbox_vnc_password: str | None = None
 
     # ----- Database -----
     # Default is an absolute path anchored to backend/.  If DATABASE_URL is
@@ -117,12 +157,59 @@ class Settings(BaseSettings):
         """Parse `cors_origins` into the list CORSMiddleware expects."""
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
 
+    # Which pipeline stage each `purpose` string belongs to.
+    _CAPTION_PURPOSES = ("keyframe_understanding",)
+    _PLAN_PURPOSES = ("plan_synthesis", "plan_correction")
+
+    def model_for_purpose(self, purpose: str | None) -> str:
+        """The model to use for one pipeline stage.
+
+        Captioning and plan synthesis have opposite cost profiles, so they can
+        be pointed at different models. An unknown or missing purpose falls
+        back to `llm_model`, which is also what happens when neither override
+        is configured.
+        """
+        if purpose in self._CAPTION_PURPOSES and self.caption_llm_model:
+            return self.caption_llm_model
+        if purpose in self._PLAN_PURPOSES and self.plan_llm_model:
+            return self.plan_llm_model
+        return self.llm_model
+
+    def effective_sandbox_provider(self) -> str:
+        """Which provider serves the sandbox's ReAct loop.
+
+        Falls back to the pipeline provider when `sandbox_llm_provider` is
+        unset, so a single-model setup keeps working unchanged.
+        """
+        return self.sandbox_llm_provider or self.llm_provider
+
+    def effective_sandbox_model(self) -> str:
+        """Which model serves the sandbox's ReAct loop.
+
+        If a sandbox PROVIDER is set without a model, falling back to
+        `llm_model` would send e.g. a Gemini model id to Anthropic, so the
+        fallback only applies when the providers actually match.
+        """
+        if self.sandbox_llm_model:
+            return self.sandbox_llm_model
+        if self.sandbox_llm_provider and self.sandbox_llm_provider != self.llm_provider:
+            raise ValueError(
+                f"SANDBOX_LLM_PROVIDER={self.sandbox_llm_provider!r} differs from "
+                f"LLM_PROVIDER={self.llm_provider!r}, so SANDBOX_LLM_MODEL must be "
+                f"set too — {self.llm_model!r} belongs to a different provider."
+            )
+        return self.llm_model
+
     def llm_env_for_sandbox(self) -> dict[str, str]:
         # API keys are intentionally NOT forwarded — the sandbox calls the
         # backend's /sandbox/llm proxy, which injects credentials server-side.
-        # LLM_PROVIDER / LLM_MODEL are non-secret and used for informational
-        # purposes (logging, model selection hint passed to the proxy).
-        return {"LLM_PROVIDER": self.llm_provider, "LLM_MODEL": self.llm_model}
+        # These two are non-secret and informational only (container logs);
+        # the backend, not the container, decides which model actually serves
+        # a request.
+        return {
+            "LLM_PROVIDER": self.effective_sandbox_provider(),
+            "LLM_MODEL": self.effective_sandbox_model(),
+        }
 
     def oauth_redirect_uri(self, provider: str) -> str:
         return f"{self.public_backend_base_url.rstrip('/')}/oauth/{provider}/callback"

@@ -21,7 +21,12 @@ export interface Automation {
   status: AutomationStatus;
   last_run_at: string | null;
   total_runs: number;
+  // A run counts as successful only when EVERY step succeeded; runs with
+  // failed or skipped steps are counted separately so a flaky automation
+  // cannot look perfect.
   successful_runs: number;
+  partial_runs: number;
+  failed_runs: number;
   tags: string[];
 }
 
@@ -36,6 +41,16 @@ export type RunStatus =
   | "canceled"
   | "budget_exceeded";
 
+export interface StepExecution {
+  step_id: string;
+  status: "pending" | "running" | "succeeded" | "failed" | "skipped" | "paused";
+  started_at: string | null;
+  finished_at: string | null;
+  attempts: number;
+  error: string | null;
+  pause_reason: string | null;
+}
+
 export interface Run {
   id: string;
   automation_id: string;
@@ -46,6 +61,7 @@ export interface Run {
   summary: string | null;
   error: string | null;
   cost: { llm_calls: number; cost_usd: number };
+  step_executions: StepExecution[];
 }
 
 export type PlanStatus =
@@ -60,5 +76,37 @@ export interface Plan {
   summary: string | null;
   status: PlanStatus;
   version: number;
-  steps: { id: string; kind: string; description: string }[];
+  approved_by: string | null;
+  approved_at: string | null;
+  source_video_id: string | null;
+  steps: {
+    id: string;
+    kind: string;
+    description: string;
+    success_condition?: string | null;
+    on_failure?: string;
+  }[];
+}
+
+/**
+ * Pipeline state for an uploaded recording.
+ *
+ * The narration fields matter as much as the status: a recording whose audio
+ * failed to transcribe still produces a plan, but that plan is missing every
+ * spoken rule, and the user has to be told.
+ */
+export interface VideoStatus {
+  video_id: string;
+  status: "uploaded" | "processing" | "completed" | "failed";
+  stage: string;
+  filename: string;
+  plan_id: string | null;
+  frame_count: number;
+  narration_segments: number;
+  narration_status: string;
+  narration_detail: string;
+  narration_approximate: boolean;
+  narration_warning: string | null;
+  error: string | null;
+  created_at: string;
 }

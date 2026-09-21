@@ -21,18 +21,45 @@ from app.core.budget import estimate_cost
 from app.core.llm.client import LLMClient, LLMResponse, UsageEvent
 
 
+def build_anthropic_client(api_key: str | None = None):
+    """Construct an Anthropic client that can actually read its responses.
+
+    WORKAROUND for an upstream bug. `httpx2` (which the Anthropic SDK builds
+    on) advertises Brotli whenever the `brotli` package is installed, then
+    decodes the response with:
+
+        self._decompress(data, output_buffer_limit=...)
+
+    `brotli.Decompressor.process()` takes no keyword arguments, so EVERY
+    Brotli-encoded response raises `TypeError` inside the decoder, which the
+    SDK surfaces as a misleading `APIConnectionError: Connection error.`
+    Anthropic returns Brotli by default, so without this the provider looks
+    unreachable while the network is perfectly fine.
+
+    Dropping `br` from Accept-Encoding sidesteps the broken code path. gzip
+    still applies, so this costs nothing measurable. Remove this once httpx2
+    fixes the decoder or the SDK stops offering Brotli.
+    """
+    # Local import so a missing package never breaks module import for users
+    # on the Gemini path.
+    import anthropic
+
+    http_client = anthropic.DefaultHttpxClient(
+        headers={"accept-encoding": "gzip, deflate"},
+    )
+    if api_key:
+        return anthropic.Anthropic(api_key=api_key, http_client=http_client)
+    return anthropic.Anthropic(http_client=http_client)
+
+
 class AnthropicLLMClient(LLMClient):
     """Claude provider. Vision + JSON output, same interface as Gemini."""
 
     provider_name = "anthropic"
 
     def __init__(self, model: str, api_key: str | None = None) -> None:
-        # Local import so a missing package never breaks module import for
-        # users on the Gemini path.
-        import anthropic
-
         self.model = model
-        self._client = anthropic.Anthropic(api_key=api_key) if api_key else anthropic.Anthropic()
+        self._client = build_anthropic_client(api_key)
 
     def generate(
         self,

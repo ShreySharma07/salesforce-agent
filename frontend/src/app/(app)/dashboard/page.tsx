@@ -49,7 +49,7 @@ export default function DashboardPage() {
           <p style={{ fontSize: 16, color: T.body, margin: "0 0 22px", maxWidth: 420, marginInline: "auto", lineHeight: 1.5 }}>
             Record a task once and approve the plan — it&apos;ll show up here, ready to run.
           </p>
-          <Link href="/plans" style={primaryBtn}>Go to plans</Link>
+          <Link href="/upload" style={primaryBtn}>Upload a recording</Link>
         </div>
       )}
 
@@ -62,9 +62,11 @@ export default function DashboardPage() {
                 <span style={{ ...statusPill(a.status), fontSize: 11.5, fontWeight: 600, padding: "3px 10px", borderRadius: 999, textTransform: "uppercase", letterSpacing: "0.04em" }}>{a.status}</span>
               </div>
               {a.description && <p style={{ margin: "0 0 16px", fontSize: 14.5, lineHeight: 1.55, color: T.dim }}>{a.description}</p>}
-              <div style={{ display: "flex", gap: 8, fontSize: 13, color: T.faint, fontWeight: 500 }}>
+              <div style={{ display: "flex", gap: 8, fontSize: 13, color: T.faint, fontWeight: 500, flexWrap: "wrap" }}>
                 <span>{a.total_runs} runs</span><span>·</span>
-                <span>{a.successful_runs} ok</span>
+                <span style={{ color: T.ok }}>{a.successful_runs} clean</span>
+                {(a.partial_runs ?? 0) > 0 && (<><span>·</span><span style={{ color: T.warn }}>{a.partial_runs} partial</span></>)}
+                {(a.failed_runs ?? 0) > 0 && (<><span>·</span><span style={{ color: T.bad }}>{a.failed_runs} failed</span></>)}
                 {a.last_run_at && (<><span>·</span><span>last {new Date(a.last_run_at).toLocaleDateString()}</span></>)}
               </div>
             </Link>

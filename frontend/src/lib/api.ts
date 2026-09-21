@@ -52,4 +52,36 @@ export const api = {
       method: "POST",
       body: body === undefined ? undefined : JSON.stringify(body),
     }),
+
+  /**
+   * Multipart upload (used for screen recordings).
+   *
+   * Deliberately does NOT go through `request`: that helper always sets
+   * Content-Type: application/json, which would corrupt a multipart body.
+   * The browser must set Content-Type itself so it can include the boundary
+   * marker, so we omit the header entirely here.
+   */
+  upload: async <T>(path: string, file: File): Promise<T> => {
+    const form = new FormData();
+    form.append("file", file);
+
+    const res = await fetch(`${BASE}${path}`, {
+      method: "POST",
+      credentials: "include",
+      body: form,
+    });
+
+    if (!res.ok) {
+      let detail = res.statusText;
+      try {
+        const body = await res.json();
+        detail = typeof body.detail === "string" ? body.detail : detail;
+      } catch {
+        /* non-JSON error body */
+      }
+      throw new ApiError(res.status, detail);
+    }
+    const text = await res.text();
+    return (text ? JSON.parse(text) : null) as T;
+  },
 };

@@ -26,32 +26,40 @@ _CANNED_TEXT_RESPONSES: dict[str, str] = {
     "plan_synthesis": json.dumps({
         "goal": "Create a new lead in Salesforce from inbound email inquiries",
         "summary": "Reads new lead inquiry emails, extracts contact details, creates a Lead record in Salesforce with appropriate field mapping.",
+        # NOTE: this fixture must satisfy the same guardrails a real generated
+        # plan does (app/core/guardrails), or mock-mode demos produce a plan
+        # that cannot be approved. In particular it must NEVER navigate to a
+        # login page: authentication goes through the open_app frontdoor.
         "steps": [
             {
                 "id": "step_001",
-                "kind": "navigate",
-                "description": "Open Salesforce",
-                "details": {"url": "https://login.salesforce.com", "expected_title_contains": "Salesforce"},
+                "kind": "ui_action",
+                "description": "Open Salesforce, already signed in",
+                "details": {
+                    "intent": "open_app",
+                    "target_description": "Salesforce Lightning",
+                },
                 "on_failure": "abort",
             },
             {
                 "id": "step_002",
-                "kind": "ui_action",
-                "description": "Navigate to the Leads tab",
+                "kind": "navigate",
+                "description": "Go to the Leads list view",
                 "details": {
-                    "intent": "Click the Leads tab in the navigation",
-                    "target_description": "the Leads tab in the top navigation bar",
+                    "url": "/lightning/o/Lead/list",
+                    "expected_title_contains": "Leads",
                 },
-                "on_failure": "pause",
+                "on_failure": "abort",
             },
             {
                 "id": "step_003",
                 "kind": "ui_action",
                 "description": "Open the New Lead form",
                 "details": {
-                    "intent": "Click the New button to open the lead creation modal",
+                    "intent": "click",
                     "target_description": "the New button in the top-right of the Leads list",
                 },
+                "success_condition": "The New Lead modal is open and its fields are visible",
                 "on_failure": "pause",
             },
         ],

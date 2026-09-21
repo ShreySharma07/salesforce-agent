@@ -36,49 +36,129 @@ class NarrationSegment:
     text: str
 
 
+@dataclass
+class TranscriptionResult:
+    """Outcome of transcribing a recording, including WHY it produced nothing.
+
+    The old contract returned a bare list, so "the user narrated important
+    business rules but transcription failed" and "the user recorded in
+    silence" were indistinguishable: both were []. The pipeline then produced
+    a plan missing every spoken rule, with nothing anywhere saying so.
+
+    status values:
+      ok           real transcript with real timestamps
+      approximate  real transcript, timestamps evenly estimated, NOT measured
+      no_speech    audio present, no speech in it
+      no_audio     the recording has no usable audio track
+      unavailable  no transcription backend was usable (e.g. no API key)
+      failed       a backend was tried and errored
+    """
+    segments: list[NarrationSegment]
+    status: str
+    detail: str = ""
+    backend: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.status in ("ok", "approximate")
+
+    @property
+    def timestamps_approximate(self) -> bool:
+        return self.status == "approximate"
+
+    @property
+    def full_text(self) -> str:
+        """The whole transcript as one string, for display and for the record."""
+        return " ".join(seg.text.strip() for seg in self.segments if seg.text.strip())
+
+
 def transcribe_video(
     video_path: Path,
     *,
     language: str | None = None,
 ) -> list[NarrationSegment]:
-    """
-    Extract and transcribe the audio track from *video_path*.
+    """Backwards-compatible wrapper: segments only, no status.
 
-    Returns a (possibly empty) list of NarrationSegments ordered by start
-    time.  Never raises — logs a warning and returns [] if all backends fail.
+    Prefer `transcribe_video_result`, which reports WHY the transcript is
+    empty. This wrapper exists so existing CLI scripts keep working.
+    """
+    return transcribe_video_result(video_path, language=language).segments
+
+
+def transcribe_video_result(
+    video_path: Path,
+    *,
+    language: str | None = None,
+) -> TranscriptionResult:
+    """Extract and transcribe the audio track, reporting how it went.
+
+    Never raises. Every failure path returns a status the caller can surface
+    to the user instead of silently continuing with no narration.
     """
     video_path = Path(video_path)
     if not video_path.exists():
-        logger.warning("audio_transcriber: video not found at %s, skipping narration", video_path)
-        return []
+        logger.warning("audio_transcriber: video not found at %s", video_path)
+        return TranscriptionResult([], "failed", f"video not found at {video_path}")
 
+    errors: list[str] = []
     with tempfile.TemporaryDirectory(prefix="atr_") as tmp:
         audio_path = Path(tmp) / "audio.wav"
         if not _extract_audio(video_path, audio_path):
-            return []
+            return TranscriptionResult(
+                [], "no_audio",
+                "ffmpeg could not extract an audio track from the recording",
+            )
 
-        # Check if the audio file has actual content (silent/no-audio tracks → skip)
+        # A near-empty wav means a silent or absent audio track.
         if audio_path.stat().st_size < 4096:
-            logger.info("audio_transcriber: audio track appears empty, skipping narration")
-            return []
+            logger.info("audio_transcriber: audio track appears empty")
+            return TranscriptionResult(
+                [], "no_audio", "the recording's audio track is silent or empty",
+            )
 
-        for backend_fn in (_try_gemini, _try_faster_whisper, _try_openai_whisper):
+        # Gemini is tried first and is the only backend that can report that
+        # its timestamps were estimated rather than measured.
+        try:
+            segs, approximate = _gemini_transcribe(audio_path, language=language)
+            if segs is not None:
+                if not segs:
+                    return TranscriptionResult([], "no_speech",
+                                               "no speech detected in the audio", "gemini")
+                status = "approximate" if approximate else "ok"
+                detail = (
+                    "timestamps are ESTIMATED (the model returned plain text, not "
+                    "timestamped segments), so narration may be attached to the "
+                    "wrong frames" if approximate else ""
+                )
+                logger.info("audio_transcriber: %d segments via gemini (%s)",
+                            len(segs), status)
+                return TranscriptionResult(segs, status, detail, "gemini")
+        except Exception as exc:
+            errors.append(f"gemini: {exc}")
+            logger.debug("audio_transcriber: gemini failed: %s", exc)
+
+        for backend_fn in (_try_faster_whisper, _try_openai_whisper):
             try:
                 segments = backend_fn(audio_path, language=language)
                 if segments is not None:
-                    logger.info(
-                        "audio_transcriber: got %d narration segments via %s",
-                        len(segments), backend_fn.__name__,
-                    )
-                    return segments
+                    name = backend_fn.__name__.replace("_try_", "")
+                    if not segments:
+                        return TranscriptionResult([], "no_speech",
+                                                   "no speech detected in the audio", name)
+                    logger.info("audio_transcriber: %d segments via %s", len(segments), name)
+                    return TranscriptionResult(segments, "ok", "", name)
             except Exception as exc:
+                errors.append(f"{backend_fn.__name__}: {exc}")
                 logger.debug("audio_transcriber: %s failed: %s", backend_fn.__name__, exc)
 
-    logger.warning(
-        "audio_transcriber: all transcription backends failed. "
-        "Ensure GEMINI_API_KEY is set, or install faster-whisper for local transcription."
+    detail = (
+        "no transcription backend was usable. Set GEMINI_API_KEY, or install "
+        "faster-whisper for local transcription."
     )
-    return []
+    if errors:
+        detail += " Errors: " + "; ".join(e[:120] for e in errors)
+    logger.warning("audio_transcriber: %s", detail)
+    return TranscriptionResult([], "unavailable" if not errors else "failed", detail)
 
 
 # ---------------------------------------------------------------------------

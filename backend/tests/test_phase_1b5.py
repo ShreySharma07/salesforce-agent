@@ -15,6 +15,7 @@ silently broken:
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime
 
 import pytest
@@ -208,18 +209,19 @@ def test_create_and_run_automation_e2e(client):
     assert final["live_view_url"] == "http://mock:6080/vnc.html"
 
 
-def test_run_token_is_hashed_never_stored_raw(client):
-    """The sandbox gets the raw token; the Run row keeps only its hash."""
-    import hashlib
-
+def test_run_token_is_never_stored_raw_and_is_revoked(client):
+    """The sandbox gets the raw token; the Run row never stores it, and the
+    token is revoked once the run finishes so a leaked copy is worthless."""
     _seed_approved_plan(client)
     auto = client.post("/automations", json={"name": "A", "plan_id": "plan_e2e"}).json()
     run = client.post(f"/automations/{auto['id']}/run").json()
 
     raw_token = MockRunner.last_env["RUN_TOKEN"]
-    stored = client.get(f"/runs/{run['id']}").json()["mcp_token_hash"]
-    assert stored == hashlib.sha256(raw_token.encode()).hexdigest()
-    assert stored != raw_token
+    assert raw_token, "the sandbox must receive a token"
+
+    final = client.get(f"/runs/{run['id']}").json()
+    assert raw_token not in json.dumps(final), "raw token must never be persisted"
+    assert final["mcp_token_hash"] is None, "token must be revoked when the run ends"
 
 
 def test_step_timings_come_from_the_sandbox(client):

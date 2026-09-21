@@ -44,7 +44,7 @@ def generate_plan(
     llm: LLMClient | None = None,
 ) -> Plan:
     """Synthesize a Plan from per-frame captions."""
-    llm = llm or get_llm_client()
+    llm = llm or get_llm_client("plan_synthesis")
 
     timeline = _build_timeline(captions)
     prompt = (
@@ -73,7 +73,7 @@ def regenerate_plan_with_feedback(
     llm: LLMClient | None = None,
 ) -> Plan:
     """Take a previous plan + the user's correction, ask the LLM to revise."""
-    llm = llm or get_llm_client()
+    llm = llm or get_llm_client("plan_correction")
 
     timeline = _build_timeline(captions)
     prompt = (
@@ -198,7 +198,7 @@ def regenerate_plan_from_intent(
     inventing steps that weren't there.
     """
     from app.core.llm.factory import get_llm_client
-    llm = llm or get_llm_client()
+    llm = llm or get_llm_client("plan_correction")
  
     if captions:
         timeline = _build_timeline(captions)

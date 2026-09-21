@@ -79,10 +79,20 @@ def extract_keyframes(
     *,
     storage: "Storage | None" = None,
     scene_threshold: float | None = None,
+    narration_windows: "list | None" = None,
 ) -> "VideoManifest":
     """Extract keyframes via HYBRID sampling: a steady time-based rate (so no
     interaction is missed) PLUS scene-change frames (so page transitions are
-    captured). Uses settings.keyframe_extraction_fps for the time rate."""
+    captured). Uses settings.keyframe_extraction_fps for the time rate.
+
+    `narration_windows` is a list of (start_s, end_s) spans where the user was
+    SPEAKING. Frames inside those spans are protected from both the
+    near-identical dedup and the frame-budget downsample. Without this, the
+    most valuable moments in a recording get thrown away: someone explaining a
+    business rule ("only escalate the ones for Acme") usually stops clicking
+    while they talk, so the screen is static, so the frame looks like a
+    duplicate, so the rule never reaches the planner.
+    """
     ensure_ffmpeg()
     settings = get_settings()
     storage = storage or get_storage()
@@ -126,18 +136,20 @@ def extract_keyframes(
  
         produced = sorted(tmp_dir.glob("frame_*.png"))
         timestamps = _parse_showinfo_timestamps(proc.stderr)
- 
+
+        windows = _normalize_windows(narration_windows)
+
         # Drop adjacent near-identical frames (idle periods) to avoid wasting
-        # caption tokens on duplicates — cheap byte-size heuristic.
-        produced, timestamps = _dedup_adjacent(produced, timestamps)
- 
-        # Cap at budget by even downsampling.
+        # caption tokens on duplicates — cheap byte-size heuristic. Narrated
+        # frames are exempt: a static screen with speech over it is the
+        # opposite of redundant.
+        produced, timestamps = _dedup_adjacent(produced, timestamps, windows=windows)
+
+        # Cap at budget, keeping every narrated frame we can.
         if len(produced) > settings.keyframe_max_count:
-            step = len(produced) / settings.keyframe_max_count
-            indices = [int(i * step) for i in range(settings.keyframe_max_count)]
-            produced = [produced[i] for i in indices]
-            if len(timestamps) >= (max(indices) + 1):
-                timestamps = [timestamps[i] for i in indices]
+            produced, timestamps = _downsample_to_budget(
+                produced, timestamps, settings.keyframe_max_count, windows,
+            )
  
         keyframes: list[Keyframe] = []
         for idx, frame_path in enumerate(produced):
@@ -166,24 +178,104 @@ def extract_keyframes(
     return manifest
  
  
-def _dedup_adjacent(frames: list, timestamps: list, *, min_pct_diff: float = 0.5):
+# How far outside a spoken segment a frame still counts as "narrated".
+# Speech about an on-screen thing routinely starts just before or trails just
+# after the action it describes.
+NARRATION_PAD_SECONDS = 1.5
+
+
+def _normalize_windows(narration_windows) -> list:
+    """Coerce narration spans into a plain list of (start, end) float pairs.
+
+    Accepts NarrationSegment objects or raw tuples so callers can pass either
+    without importing the transcriber.
+    """
+    out: list = []
+    for w in narration_windows or []:
+        try:
+            if isinstance(w, (tuple, list)) and len(w) >= 2:
+                out.append((float(w[0]), float(w[1])))
+            else:
+                out.append((float(w.start_s), float(w.end_s)))
+        except (TypeError, ValueError, AttributeError):
+            continue
+    return out
+
+
+def _is_narrated(ts: float, windows: list, pad: float = NARRATION_PAD_SECONDS) -> bool:
+    """True if the user was speaking at (or right around) this timestamp."""
+    return any(start - pad <= ts <= end + pad for start, end in windows)
+
+
+def _dedup_adjacent(frames: list, timestamps: list, *, min_pct_diff: float = 0.5,
+                    windows: list | None = None):
     """Remove a frame if it's within min_pct_diff% file-size of the previous
     kept frame (a cheap 'looks basically identical' proxy that avoids decoding
     pixels). Keeps the first frame always. Conservative — only drops obvious
-    idle duplicates, never near-distinct interaction frames."""
+    idle duplicates, never near-distinct interaction frames.
+
+    A frame whose timestamp falls inside a narration window is always kept,
+    however similar it looks: the screen being static is exactly what happens
+    while someone explains a rule out loud.
+    """
     if not frames:
         return frames, timestamps
+    windows = windows or []
     kept_f = [frames[0]]
     kept_t = [timestamps[0]] if timestamps else []
     last_size = frames[0].stat().st_size
     for i in range(1, len(frames)):
         size = frames[i].stat().st_size
         diff_pct = abs(size - last_size) / max(last_size, 1) * 100
-        if diff_pct >= min_pct_diff:
+        ts = timestamps[i] if i < len(timestamps) else None
+        narrated = ts is not None and _is_narrated(ts, windows)
+        if diff_pct >= min_pct_diff or narrated:
             kept_f.append(frames[i])
             if i < len(timestamps):
                 kept_t.append(timestamps[i])
             last_size = size
+    return kept_f, kept_t
+
+
+def _downsample_to_budget(frames: list, timestamps: list, budget: int, windows: list):
+    """Reduce to `budget` frames, keeping narrated ones in preference.
+
+    Narrated frames are taken first, then the remaining budget is filled with
+    evenly spaced frames from the rest, so coverage stays uniform while the
+    spoken parts survive. Falls back to plain even sampling when nothing is
+    narrated.
+    """
+    n = len(frames)
+    if n <= budget:
+        return frames, timestamps
+
+    narrated_idx = [
+        i for i in range(n)
+        if i < len(timestamps) and _is_narrated(timestamps[i], windows)
+    ]
+    if not narrated_idx:
+        step = n / budget
+        chosen = sorted({int(i * step) for i in range(budget)})
+    else:
+        # Narration gets priority but not the whole budget. In a heavily
+        # narrated recording almost every frame qualifies, and spending the
+        # entire budget there would abandon coverage of the rest of the task.
+        # Half is the cap; within that, sample the narrated frames evenly so
+        # the whole spoken span is represented rather than just its start.
+        narr_budget = min(len(narrated_idx), max(1, budget // 2))
+        n_step = len(narrated_idx) / narr_budget
+        keep = {narrated_idx[int(i * n_step)] for i in range(narr_budget)}
+
+        remaining = budget - len(keep)
+        if remaining > 0:
+            others = [i for i in range(n) if i not in keep]
+            if others:
+                o_step = len(others) / remaining
+                keep.update(others[int(i * o_step)] for i in range(remaining))
+        chosen = sorted(keep)
+
+    kept_f = [frames[i] for i in chosen]
+    kept_t = [timestamps[i] for i in chosen if i < len(timestamps)]
     return kept_f, kept_t
  
 

@@ -47,7 +47,7 @@ def caption_keyframes(
     any narration spoken within ±2 s of that keyframe's timestamp.
     """
     storage = storage or get_storage()
-    llm = llm or get_llm_client()
+    llm = llm or get_llm_client("keyframe_understanding")
 
     captions: list[FrameCaption] = []
     frames = manifest.keyframes

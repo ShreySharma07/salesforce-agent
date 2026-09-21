@@ -1,9 +1,20 @@
 """
 Sandbox LLM client.
 
-The sandbox does NOT hold an LLM API key. This client calls the backend's
-/sandbox/llm/generate proxy endpoint, which makes the real Gemini call with
-the backend's key. The sandbox authenticates with its per-run RUN_TOKEN.
+IMPORTANT: despite the class name, this does NOT talk to Gemini. It is a thin
+HTTP client for the backend's /sandbox/llm/generate proxy. Which provider and
+model actually serve a request is decided ENTIRELY by the backend, from
+SANDBOX_LLM_PROVIDER / SANDBOX_LLM_MODEL (falling back to LLM_PROVIDER /
+LLM_MODEL). The sandbox can therefore run on Claude while the video-to-plan
+pipeline runs on Gemini, with no change in here.
+
+The class keeps the name `GeminiClient` only because browser_mode,
+computer_mode and executor import it under that name; `LLMProxyClient` is an
+alias for new code.
+
+The sandbox does NOT hold an LLM API key. The backend makes the real provider
+call with its own key, and the sandbox authenticates with its per-run
+RUN_TOKEN.
 
 Public surface is unchanged from the old direct-Gemini client:
   GeminiClient().generate(prompt, system=, images=, json_mode=, max_tokens=)
@@ -48,8 +59,11 @@ class QuotaExhaustedError(LLMClientError):
 
 
 class GeminiClient:
-    """Name kept for compatibility — it no longer calls Gemini directly,
-    it calls the backend LLM proxy."""
+    """Calls the backend LLM proxy, NOT Gemini.
+
+    The name is historical and kept because the executor and both execution
+    modes import it. Use the `LLMProxyClient` alias in new code.
+    """
 
     def __init__(self, model: str | None = None, api_key: str | None = None):
         # api_key is accepted but ignored — the sandbox never holds a key.
@@ -129,3 +143,7 @@ class GeminiClient:
             output_tokens=data.get("output_tokens", 0),
             latency_ms=data.get("latency_ms", latency_ms),
         )
+
+
+# Accurate name for new code. Same object, so existing imports keep working.
+LLMProxyClient = GeminiClient

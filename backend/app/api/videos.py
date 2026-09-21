@@ -51,7 +51,13 @@ MAX_UPLOAD_BYTES = 512 * 1024 * 1024  # 512 MB
 
 
 class VideoStatus(BaseModel):
-    """What the dashboard polls while the pipeline runs."""
+    """What the dashboard polls while the pipeline runs.
+
+    The narration fields are deliberately prominent. A recording whose audio
+    failed to transcribe still produces a plan, but that plan is missing every
+    spoken rule, and the user has to be told rather than left to discover it
+    when the automation does the wrong thing.
+    """
     video_id: str
     user_id: str
     status: str            # uploaded | processing | completed | failed
@@ -60,6 +66,14 @@ class VideoStatus(BaseModel):
     plan_id: str | None = None
     frame_count: int = 0
     narration_segments: int = 0
+    # ok | approximate | no_speech | no_audio | unavailable | failed
+    narration_status: str = ""
+    narration_detail: str = ""
+    # True when timestamps were estimated, so narration may sit on the wrong
+    # frame and any spoken rule should be double-checked in the plan.
+    narration_approximate: bool = False
+    # Set when narration is missing or unreliable, for the UI to show plainly.
+    narration_warning: str | None = None
     error: str | None = None
     created_at: str = ""
     updated_at: str = ""
@@ -169,6 +183,23 @@ async def get_video_plan(video_id: str, user: User = Depends(get_current_user),
     return plan
 
 
+@router.get("/{video_id}/transcript")
+async def get_video_transcript(video_id: str, user: User = Depends(get_current_user)):
+    """The full spoken transcript for a recording, with per-segment timings.
+
+    Kept separate from the plan so the user can check what the agent actually
+    heard, which is the fastest way to explain a plan that missed a rule.
+    """
+    status = _read_status(video_id)
+    if status is None or status.user_id != user.id:
+        raise HTTPException(404, f"video {video_id} not found")
+    storage = get_storage()
+    key = f"transcripts/{video_id}.json"
+    if not storage.exists(key):
+        raise HTTPException(404, f"no transcript stored for video {video_id}")
+    return json.loads(storage.read_text(key))
+
+
 # ---------------------------------------------------------------------------
 # The pipeline itself
 # ---------------------------------------------------------------------------
@@ -215,9 +246,11 @@ def _run_pipeline(video_id: str, source_key: str, status: VideoStatus) -> dict[s
 
     Runs in a worker thread (ffmpeg and the vision calls are synchronous).
     Captions are written to `captions/<video_id>.json` so a later plan
-    correction can be anchored to the original recording.
+    correction can be anchored to the original recording, and the full
+    transcript is written to `transcripts/<video_id>.json` so the spoken
+    record survives independently of the plan.
     """
-    from app.agent.audio_transcriber import transcribe_video
+    from app.agent.audio_transcriber import transcribe_video_result
     from app.agent.keyframe_captioner import caption_keyframes
     from app.agent.plan_generator import generate_plan
     from app.agent.video_processor import extract_keyframes
@@ -225,13 +258,41 @@ def _run_pipeline(video_id: str, source_key: str, status: VideoStatus) -> dict[s
     storage = get_storage()
     local_video = storage.local_path(source_key)
 
-    # 1. Narration (optional — a silent recording is fine).
-    narration = transcribe_video(local_video)
+    # 1. Narration. A silent recording is fine, but a FAILED transcription is
+    # not the same thing and must be reported rather than silently dropped.
+    transcription = transcribe_video_result(local_video)
+    narration = transcription.segments
+    status.narration_status = transcription.status
+    status.narration_detail = transcription.detail
+    status.narration_approximate = transcription.timestamps_approximate
+    status.narration_segments = len(narration)
+    status.narration_warning = _narration_warning(transcription)
+    if status.narration_warning:
+        log.warning("video %s narration: %s", video_id, status.narration_warning)
+    _write_status(status)
 
-    # 2. Keyframes.
+    # Preserve the transcript verbatim, separate from the plan it informs.
+    storage.write_text(
+        f"transcripts/{video_id}.json",
+        json.dumps({
+            "video_id": video_id,
+            "status": transcription.status,
+            "detail": transcription.detail,
+            "backend": transcription.backend,
+            "timestamps_approximate": transcription.timestamps_approximate,
+            "full_text": transcription.full_text,
+            "segments": [asdict(seg) for seg in narration],
+        }, indent=2),
+    )
+
+    # 2. Keyframes. Narration spans are passed in so frames where the user was
+    # TALKING survive dedup and downsampling even if the screen was static.
     status.stage = "extracting keyframes"
     _write_status(status)
-    manifest = extract_keyframes(source_key, video_id=video_id, storage=storage)
+    manifest = extract_keyframes(
+        source_key, video_id=video_id, storage=storage,
+        narration_windows=[(seg.start_s, seg.end_s) for seg in narration],
+    )
 
     # 3. Captions (vision LLM), enriched with narration.
     status.stage = f"captioning {manifest.frame_count} keyframes"
@@ -257,3 +318,37 @@ def _run_pipeline(video_id: str, source_key: str, status: VideoStatus) -> dict[s
         "frame_count": manifest.frame_count,
         "narration_segments": len(narration or []),
     }
+
+
+def _narration_warning(transcription) -> str | None:
+    """A plain-language warning when narration is missing or unreliable.
+
+    Returns None when the transcript is trustworthy, so the UI can show this
+    field whenever it is set without deciding severity itself.
+    """
+    messages = {
+        "approximate": (
+            "Narration was transcribed but its timestamps are ESTIMATED, not "
+            "measured. Spoken instructions may be attached to the wrong moment "
+            "in the recording — check the plan reflects what you said."
+        ),
+        "no_speech": (
+            "No speech was detected in this recording. The plan was built from "
+            "the visuals alone, so any rule you intended to say out loud is not "
+            "in it."
+        ),
+        "no_audio": (
+            "This recording has no usable audio track. The plan was built from "
+            "the visuals alone — spoken rules could not be captured."
+        ),
+        "unavailable": (
+            "Narration could NOT be transcribed: no transcription backend was "
+            "available. The plan was built from the visuals alone and is "
+            "missing anything you explained out loud."
+        ),
+        "failed": (
+            "Narration transcription FAILED. The plan was built from the "
+            "visuals alone and is missing anything you explained out loud."
+        ),
+    }
+    return messages.get(transcription.status)

@@ -20,7 +20,7 @@ import sys
 import uuid
 from pathlib import Path
 
-from app.agent.audio_transcriber import transcribe_video
+from app.agent.audio_transcriber import transcribe_video_result
 from app.agent.keyframe_captioner import caption_keyframes, FRAMES_PER_BATCH
 from app.agent.plan_generator import generate_plan, regenerate_plan_from_intent
 from app.agent.video_processor import extract_keyframes
@@ -56,14 +56,27 @@ def main() -> int:
     print(f"\n[1/4] Stored source video at: {src_key}")
 
     print("[2/4] Transcribing audio narration...")
-    narration = transcribe_video(args.video)
-    if narration:
-        print(f"      {len(narration)} narration segments transcribed")
+    transcription = transcribe_video_result(args.video)
+    narration = transcription.segments
+    if transcription.ok:
+        print(f"      {len(narration)} narration segments transcribed "
+              f"via {transcription.backend}")
+        if transcription.timestamps_approximate:
+            print("      ⚠️  timestamps are ESTIMATED, not measured — narration may")
+            print("         be attached to the wrong frames. Check the plan carefully.")
     else:
-        print("      No narration found (silent video or no transcription backend available)")
+        # Never let a transcription failure pass as "the video was silent":
+        # the resulting plan is missing every spoken rule.
+        print(f"      ⚠️  NO NARRATION ({transcription.status}): {transcription.detail}")
+        print("         The plan will be built from the visuals alone.")
 
     print("[3/4] Extracting keyframes...")
-    manifest = extract_keyframes(src_key, video_id=video_id, storage=storage)
+    manifest = extract_keyframes(
+        src_key, video_id=video_id, storage=storage,
+        # Protect frames where the user was speaking; a static screen with
+        # narration over it is the opposite of a redundant frame.
+        narration_windows=[(seg.start_s, seg.end_s) for seg in narration],
+    )
     print(f"      {manifest.frame_count} keyframes from {manifest.duration_seconds}s video")
 
     n_caption_calls = (manifest.frame_count + FRAMES_PER_BATCH - 1) // FRAMES_PER_BATCH

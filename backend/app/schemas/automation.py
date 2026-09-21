@@ -39,5 +39,15 @@ class Automation(BaseModel):
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     last_run_at: datetime | None = None
     total_runs: int = 0
+    # A run counts as successful ONLY when every step succeeded. A run that
+    # finished with some steps failed or skipped is counted separately —
+    # folding it into successful_runs makes a flaky automation look healthy.
     successful_runs: int = 0
+    partial_runs: int = 0
+    failed_runs: int = 0
     tags: list[str] = Field(default_factory=list)
+
+    @property
+    def success_rate(self) -> float:
+        """Fraction of runs where every step succeeded."""
+        return self.successful_runs / self.total_runs if self.total_runs else 0.0

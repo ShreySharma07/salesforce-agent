@@ -10,26 +10,25 @@ from app.core.llm.mock import MockLLMClient
 
 
 def get_llm_client(purpose: str | None = None) -> LLMClient:
-    """Return the configured client. `purpose` is reserved for future
-    routing (e.g., use Flash for cheap tasks, Pro for plan synthesis)."""
+    """Return a client for one pipeline stage.
+
+    `purpose` selects the model: captioning and plan synthesis can run on
+    different models (see Settings.model_for_purpose), because captioning is
+    token-heavy but easy while plan synthesis is one demanding call.
+    """
     settings = get_settings()
+    model = settings.model_for_purpose(purpose)
 
     if settings.llm_provider == "mock":
-        return MockLLMClient(model=settings.llm_model)
+        return MockLLMClient(model=model)
 
     if settings.llm_provider == "gemini":
         from app.core.llm.gemini import GeminiLLMClient
-        return GeminiLLMClient(
-            model=settings.llm_model,
-            api_key=settings.gemini_api_key,
-        )
+        return GeminiLLMClient(model=model, api_key=settings.gemini_api_key)
 
     if settings.llm_provider == "anthropic":
         from app.core.llm.anthropic_client import AnthropicLLMClient
-        return AnthropicLLMClient(
-            model=settings.llm_model,
-            api_key=settings.anthropic_api_key,
-        )
+        return AnthropicLLMClient(model=model, api_key=settings.anthropic_api_key)
 
     if settings.llm_provider == "openai":
         raise NotImplementedError(

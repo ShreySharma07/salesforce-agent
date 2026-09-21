@@ -123,8 +123,14 @@ async def run_automation(
         triggered_by=RunTrigger.MANUAL,
         triggered_by_user=user.id,
         status=RunStatus.PROVISIONING,
+        # Freeze exactly what was approved. The run executes THIS, not a fresh
+        # read of the plan row, so a plan edited while the run sits queued
+        # cannot change what the sandbox does.
+        plan_snapshot=plan.model_dump(mode="json"),
     )
     await repo.save_run(run)
+    log.info("queued run %s for automation %s (plan %s v%d approved by %s)",
+             run.id, auto.id, plan.id, plan.version, plan.approved_by)
 
     # The dashboard polls GET /runs/{id} for progress from here.
     background.add_task(execute_run, run.id)

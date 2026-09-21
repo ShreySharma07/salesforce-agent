@@ -27,8 +27,9 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
   }
 
   const nav = [
-    { href: "/dashboard", label: "Automations" },
+    { href: "/upload", label: "Upload" },
     { href: "/plans", label: "Plans" },
+    { href: "/dashboard", label: "Automations" },
   ];
 
   return (
@@ -53,7 +54,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
         </nav>
 
         <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
-          <span style={{ fontSize: 13.5, color: T.body }}>{user.email}</span>
+          <span style={{ fontSize: 13.5, color: T.body }}>{user?.email}</span>
           <button
             onClick={async () => { await logout.mutateAsync(); router.replace("/login"); }}
             style={{ background: "#fff", border: "1px solid rgba(11,18,51,0.12)", color: T.ink2, borderRadius: 999, padding: "7px 14px", fontSize: 13.5, cursor: "pointer", fontWeight: 600 }}

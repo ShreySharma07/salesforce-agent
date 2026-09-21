@@ -168,8 +168,9 @@ class SqlRepo(Repository):
                 existing.summary = run.summary
                 existing.cost_usd = cost_usd
                 existing.llm_calls = llm_calls
-                if run.mcp_token_hash is not None:
-                    existing.mcp_token_hash = run.mcp_token_hash
+                # A None here is a deliberate REVOCATION (the run finished),
+                # not "unchanged" — persist it so the token stops working.
+                existing.mcp_token_hash = run.mcp_token_hash
             else:
                 session.add(RunOrm(
                     id=run.id, automation_id=run.automation_id,

@@ -110,8 +110,9 @@ async def call_tool(
     except KeyError:
         raise HTTPException(404, f"unknown MCP server: {server}")
 
-    # 2. Look up which user this run belongs to + validate run token
-    user_id = await _resolve_user_for_run(body.run_id, authorization)
+    # 2. Validate the run token, resolve the owner, and confirm the approved
+    #    plan actually authorizes THIS tool.
+    user_id = await _resolve_user_for_run(body.run_id, authorization, server=server, tool=tool)
 
     # 3. Fetch credentials if the server needs them
     credentials: dict[str, Any] | None = None
@@ -152,16 +153,35 @@ async def call_tool(
 # Helpers
 # -----------------------------------------------------------------------
 
-async def _resolve_user_for_run(run_id: str | None, authorization: str | None) -> str:
+async def _resolve_user_for_run(run_id: str | None, authorization: str | None,
+                                *, server: str, tool: str) -> str:
     """Validate the per-run bearer token and return the owning user_id.
 
-    Rejects (401) when: no run_id, unknown run, run has no issued token,
-    missing/malformed Authorization header, or hash mismatch. Uses a
-    constant-time compare on the hashes.
+    Rejects (401) when: no run_id, unknown run, run already finished, run has
+    no issued token, missing/malformed Authorization header, or hash mismatch.
+    Uses a constant-time compare on the hashes.
+
+    Rejects (403) when the approved plan never declared this tool. The token
+    proves WHICH run is calling; the plan defines what that run is allowed to
+    do, and those are different questions.
     """
-    from app.services.run_auth import authenticate_run
+    from app.services.run_auth import authenticate_run, authorized_mcp_tools
 
     run = await authenticate_run(run_id, authorization)
+
+    allowed = authorized_mcp_tools(run)
+    if allowed is None:
+        log.warning("run %s has no plan snapshot — cannot scope %s/%s, allowing",
+                    run.id, server, tool)
+    elif (server.lower(), tool) not in allowed:
+        log.warning("run %s attempted undeclared tool %s/%s (allowed: %s)",
+                    run.id, server, tool, sorted(allowed) or "none")
+        raise HTTPException(
+            403,
+            f"run {run.id} is not authorized to call {server}/{tool}: its "
+            f"approved plan does not declare that tool",
+        )
+
     repo = get_repository()
     automation = await repo.get_automation(run.automation_id)
     if automation is None or not automation.user_id:

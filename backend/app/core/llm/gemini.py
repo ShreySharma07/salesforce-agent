@@ -92,6 +92,11 @@ class GeminiLLMClient(LLMClient):
         if cand and cand.content and cand.content.parts:
             text = "".join(p.text for p in cand.content.parts if getattr(p, "text", None))
 
+        # An empty response is never useful to a caller here: captions become
+        # blank and plan JSON becomes unparseable. Fail with a reason instead.
+        if not text.strip():
+            raise RuntimeError(_explain_empty_gemini_response(raw, self.model, max_tokens))
+
         usage = UsageEvent(
             model=self.model, provider=self.provider_name,
             input_tokens=in_tok, output_tokens=out_tok,
@@ -119,3 +124,36 @@ class GeminiLLMClient(LLMClient):
         except (json.JSONDecodeError, TypeError, ValueError):
             instance = None
         return instance, response.usage
+
+
+def _explain_empty_gemini_response(raw, model: str, max_tokens: int) -> str:
+    """Why did Gemini return no text? Turn silence into a usable error.
+
+    Gemini 2.5+/3.x models THINK, and thinking tokens are charged against
+    `max_output_tokens`. When the budget is small the model can spend all of
+    it reasoning and emit no visible text at all: the call succeeds, usage is
+    non-zero, and the response text is "".
+
+    Left unchecked that empty string flows downstream as an empty caption or
+    as unparseable plan JSON, and the user sees "Gemini is not working" with
+    nothing to act on. This produces the sentence that actually helps.
+    """
+    usage = getattr(raw, "usage_metadata", None)
+    thoughts = getattr(usage, "thoughts_token_count", 0) or 0
+    cand = raw.candidates[0] if getattr(raw, "candidates", None) else None
+    finish = getattr(cand, "finish_reason", None)
+    finish_name = getattr(finish, "name", str(finish))
+
+    if finish_name == "MAX_TOKENS":
+        return (
+            f"{model} returned NO text: it hit max_output_tokens={max_tokens} "
+            f"after spending {thoughts} tokens on internal thinking. Thinking "
+            f"counts against the output budget on this model. Raise max_tokens, "
+            f"or use a non-thinking model."
+        )
+    if finish_name in ("SAFETY", "PROHIBITED_CONTENT", "RECITATION"):
+        return f"{model} returned no text: blocked with finish_reason={finish_name}."
+    return (
+        f"{model} returned no text (finish_reason={finish_name}, "
+        f"thinking tokens={thoughts})."
+    )

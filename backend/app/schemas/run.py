@@ -92,3 +92,9 @@ class Run(BaseModel):
     recording_url: str | None = None
     audit_log_count: int = 0
     mcp_token_hash: str | None = None
+    # The EXACT plan this run was authorized to execute, captured when the run
+    # was queued. The run executes this snapshot, never a fresh read of the
+    # plan row: a plan edited or re-approved between queueing and execution
+    # must not change what an already-authorized run does. Resumed runs
+    # inherit the snapshot of the run they continue.
+    plan_snapshot: dict[str, Any] | None = None

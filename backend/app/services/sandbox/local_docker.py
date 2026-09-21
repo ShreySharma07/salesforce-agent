@@ -43,6 +43,39 @@ def _find_free_port() -> int:
     raise RuntimeError("could not find a free port in 50060-55600 range")
 
 
+# Env vars whose VALUES must never reach a log line or an error message.
+_SECRET_ENV_KEYS = ("TOKEN", "KEY", "SECRET", "PASSWORD", "CREDENTIAL", "FRONTDOOR_PATH")
+
+
+def _redact_cmd(cmd: list[str]) -> str:
+    """Render a docker command with every secret env value masked.
+
+    `-e NAME=value` pairs are the only place secrets appear, so the name is
+    kept (it is useful for debugging) and the value is replaced.
+    """
+    out: list[str] = []
+    for part in cmd:
+        if part.startswith(("-e",)) or "=" not in part:
+            out.append(part)
+            continue
+        name, _, _value = part.partition("=")
+        if any(marker in name.upper() for marker in _SECRET_ENV_KEYS):
+            out.append(f"{name}=<redacted>")
+        else:
+            out.append(part)
+    return " ".join(out)
+
+
+def _redact_text(text: str) -> str:
+    """Mask anything that looks like a secret assignment in captured output."""
+    import re
+
+    pattern = re.compile(
+        r"\b([A-Z0-9_]*(?:" + "|".join(_SECRET_ENV_KEYS) + r")[A-Z0-9_]*)=\S+"
+    )
+    return pattern.sub(r"\1=<redacted>", text or "")
+
+
 class LocalDockerRunner(SandboxRunner):
     runner_kind = "local_docker"
 
@@ -51,12 +84,19 @@ class LocalDockerRunner(SandboxRunner):
         agent_port = _find_free_port()
         novnc_port = _find_free_port()
 
+        from app.config import get_settings
+
+        # Publish on loopback by default. The agent control port accepts a
+        # plan to execute and the noVNC port streams the live desktop, so
+        # exposing either on 0.0.0.0 hands both to anyone on the network.
+        bind = get_settings().sandbox_bind_host
+
         # Build docker run command. Each -e flag passes one env var.
         cmd = [
             "docker", "run", "-d",
             "--name", sandbox_id,
-            "-p", f"{agent_port}:8000",
-            "-p", f"{novnc_port}:6080",
+            "-p", f"{bind}:{agent_port}:8000",
+            "-p", f"{bind}:{novnc_port}:6080",
             f"--shm-size={config.shm_size_mb}m",
         ]
         for key, value in config.env.items():
@@ -65,10 +105,12 @@ class LocalDockerRunner(SandboxRunner):
             cmd += ["-v", f"{config.dev_mount}:/opt/sandbox_agent"]
         cmd.append(config.image)
 
-        # Log the exact command we're running so we can replicate it manually
         import logging
         log = logging.getLogger("sandbox")
-        log.info("Running: %s", " ".join(cmd))
+        # NEVER log the raw command: it carries RUN_TOKEN and any other
+        # injected secret as -e flags, and run logs are routinely pasted into
+        # issues and shared terminals.
+        log.info("Running: %s", _redact_cmd(cmd))
 
         result = await asyncio.to_thread(
             subprocess.run, cmd, capture_output=True, text=True
@@ -76,9 +118,9 @@ class LocalDockerRunner(SandboxRunner):
         if result.returncode != 0:
             raise RuntimeError(
                 f"docker run failed (exit {result.returncode}):\n"
-                f"  cmd: {' '.join(cmd)}\n"
-                f"  stdout: {result.stdout.strip()}\n"
-                f"  stderr: {result.stderr.strip()}"
+                f"  cmd: {_redact_cmd(cmd)}\n"
+                f"  stdout: {_redact_text(result.stdout.strip())}\n"
+                f"  stderr: {_redact_text(result.stderr.strip())}"
             )
         container_id = result.stdout.strip()
         if not container_id:
@@ -97,6 +139,10 @@ class LocalDockerRunner(SandboxRunner):
                 "container_id": container_id,
                 "agent_port": agent_port,
                 "novnc_port": novnc_port,
+                # Kept so execute_plan can authenticate to the sandbox's own
+                # /run endpoint. Handle metadata is provider-internal and is
+                # never inspected or persisted outside this runner.
+                "run_token": config.env.get("RUN_TOKEN", ""),
             },
         )
 
@@ -157,8 +203,14 @@ class LocalDockerRunner(SandboxRunner):
         # (browser close, response serialisation).  Never let the HTTP client
         # race the sandbox to a timeout; the sandbox enforces its own limits.
         http_timeout = max_seconds + 600 + 120  # 600 = max per-step default
+        # The sandbox authenticates /run with the same per-run token it was
+        # given at spawn, so nothing else on the host can drive the browser.
+        headers = {}
+        token = (handle.metadata or {}).get("run_token")
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
         async with httpx.AsyncClient(timeout=http_timeout) as client:
-            r = await client.post(f"{handle.api_url}/run", json=body)
+            r = await client.post(f"{handle.api_url}/run", json=body, headers=headers)
             if r.status_code >= 400:
                 raise RuntimeError(
                     f"sandbox /run returned {r.status_code}: {r.text[:2000]}"

@@ -101,10 +101,15 @@ def _gemini_generate(req: LLMGenerateRequest) -> LLMGenerateResponse:
 
     settings = get_settings()
     if not settings.gemini_api_key:
-        raise HTTPException(500, "backend has no GEMINI_API_KEY configured")
+        raise HTTPException(
+            500,
+            "the sandbox is configured to use Gemini but the backend has no "
+            "GEMINI_API_KEY set",
+        )
 
     client = genai.Client(api_key=settings.gemini_api_key)
-    model = settings.llm_model
+    # The SANDBOX model, which may differ from the one used to build plans.
+    model = settings.effective_sandbox_model()
 
     parts: list[Any] = [Part(text=req.prompt)]
     for img_b64 in req.images_b64:
@@ -193,6 +198,13 @@ def _gemini_generate(req: LLMGenerateRequest) -> LLMGenerateResponse:
     if cand and cand.content and cand.content.parts:
         text = "".join(p.text for p in cand.content.parts if getattr(p, "text", None))
 
+    # The ReAct loop cannot act on an empty response; surfacing the reason
+    # puts it in the step's trace instead of looking like a parse failure.
+    if not text.strip():
+        from app.core.llm.gemini import _explain_empty_gemini_response
+        raise RuntimeError(
+            _explain_empty_gemini_response(raw, model, req.max_tokens))
+
     return LLMGenerateResponse(
         ok=True, text=text, model=model,
         input_tokens=in_tok, output_tokens=out_tok, latency_ms=latency_ms,
@@ -202,14 +214,21 @@ def _gemini_generate(req: LLMGenerateRequest) -> LLMGenerateResponse:
 def _claude_generate(req: LLMGenerateRequest) -> LLMGenerateResponse:
     """Call Claude (Anthropic) using the backend's configured key. Synchronous —
     wrapped in a threadpool by FastAPI since the route is declared sync."""
-    import anthropic
+    from app.core.llm.anthropic_client import build_anthropic_client
 
     settings = get_settings()
     if not settings.anthropic_api_key:
-        raise HTTPException(500, "backend has no ANTHROPIC_API_KEY configured")
+        raise HTTPException(
+            500,
+            "the sandbox is configured to use Claude but the backend has no "
+            "ANTHROPIC_API_KEY set",
+        )
 
-    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
-    model = settings.llm_model  # e.g. "claude-sonnet-4-6"
+    # Shared constructor: carries the Brotli workaround, without which every
+    # Claude call fails as a bogus "Connection error".
+    client = build_anthropic_client(settings.anthropic_api_key)
+    # The SANDBOX model, which may differ from the one used to build plans.
+    model = settings.effective_sandbox_model()
 
     # Build the user content block: images first, then the text prompt.
     # Claude processes images before text so spatial reasoning sees the
@@ -326,7 +345,14 @@ async def generate(
         log.warning("run %s refused an LLM call: %s", req.run_id, reason)
         return LLMGenerateResponse(ok=False, error=reason, budget_exceeded=True)
 
-    provider = settings.llm_provider
+    # The ReAct loop's provider, which is independent of the one that built
+    # the plan. Config errors surface as 500 here rather than as a confusing
+    # provider-side rejection.
+    try:
+        provider = settings.effective_sandbox_provider()
+        settings.effective_sandbox_model()
+    except ValueError as e:
+        raise HTTPException(500, str(e))
     _fn = _claude_generate if provider == "anthropic" else _gemini_generate
     try:
         # Both generators are sync + blocking; run off the event loop.
@@ -343,7 +369,7 @@ async def generate(
 
     # Record what this call cost against the run's ledger.
     spend = tracker.record(
-        req.run_id, model=result.model or settings.llm_model,
+        req.run_id, model=result.model or settings.effective_sandbox_model(),
         input_tokens=result.input_tokens, output_tokens=result.output_tokens,
     )
     if spend is not None:

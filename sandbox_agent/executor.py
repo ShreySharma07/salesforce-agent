@@ -412,6 +412,57 @@ def _run_loop(
 
 
 # ---------------------------------------------------------------------------
+# Resume
+# ---------------------------------------------------------------------------
+
+def _is_context_step(step: Step) -> bool:
+    """True if this step rebuilds browser/session state rather than changing data.
+
+    A resumed run gets a BRAND NEW container and a blank browser: no session,
+    no open record, no navigation history. Steps before the resume point must
+    therefore be treated in two very different ways. Data-changing steps are
+    skipped, because the paused run already performed them and repeating them
+    would duplicate work. Context steps are REPLAYED, because without them the
+    fresh browser is sitting on a blank page and every later step fails.
+
+    Context steps are idempotent and cheap by nature: logging in via open_app,
+    navigating to a URL, waiting.
+    """
+    if step.kind in (StepKind.NAVIGATE, StepKind.WAIT):
+        return True
+    if step.kind == StepKind.UI_ACTION:
+        intent = str(step.details.get("intent", "")).strip().lower()
+        target = str(step.details.get("target_description", "")).strip().lower()
+        if intent == "open_app" or "open_app" in target:
+            return True
+    return False
+
+
+def _resolve_resume_target(
+    start_at_step_id: str | None, step_by_id: dict[str, Step], child_ids: set[str],
+) -> str | None:
+    """Map a resume target onto a step the TOP-LEVEL walk will actually reach.
+
+    A paused step is often inside a loop body or a decision branch, and the
+    linear walk never visits those directly — their parent dispatches them.
+    Fast-forwarding to such a child would match nothing, skip every step, and
+    the run would do nothing at all. Resolving to the owning parent lets the
+    loop re-enter its body normally, which is also what a drain loop wants:
+    it re-reads the list and picks up whatever is still outstanding.
+    """
+    if not start_at_step_id or start_at_step_id not in child_ids:
+        return start_at_step_id
+    for candidate in step_by_id.values():
+        d = candidate.details or {}
+        owned = list(d.get("body") or []) + list(d.get("if_true") or []) + list(d.get("if_false") or [])
+        if start_at_step_id in owned:
+            log.info("resume target %s is inside %s — resuming at the parent",
+                     start_at_step_id, candidate.id)
+            return candidate.id
+    return start_at_step_id
+
+
+# ---------------------------------------------------------------------------
 # Failure policy
 # ---------------------------------------------------------------------------
 
@@ -552,6 +603,9 @@ def run_plan(req: RunRequest) -> RunResponse:
                 return _finish("failed", step_results, page,
                                f"resume target step {req.start_at_step_id!r} is not in this plan",
                                started)
+            resume_target = _resolve_resume_target(
+                req.start_at_step_id, step_by_id, child_ids,
+            ) if resume_pending else None
             step_count = 0
             # Carry the last step's final observation forward so the next step's
             # ReAct loop knows what page state was left — avoids re-exploring
@@ -559,14 +613,27 @@ def run_plan(req: RunRequest) -> RunResponse:
             prev_step_context: str = ""
 
             for step in req.plan.steps:
-                if resume_pending:
-                    # Fast-forward to the step the paused run stopped on.
-                    if step.id != req.start_at_step_id:
-                        continue
-                    resume_pending = False
-                    log.info("resuming plan %s at step %s", req.plan.id, step.id)
                 if step.id in child_ids:
                     continue  # handled by its DECISION/LOOP parent
+
+                if resume_pending:
+                    if step.id == resume_target:
+                        resume_pending = False
+                        log.info("resuming plan %s at step %s", req.plan.id, step.id)
+                    elif _is_context_step(step):
+                        # Replay it: the fresh browser needs this to get back
+                        # to where the paused run was. Falls through to the
+                        # normal dispatch below, failure policy included.
+                        log.info("resume: replaying context step %s (%s)",
+                                 step.id, step.kind.value)
+                    else:
+                        step_results.append(StepResult(
+                            step_id=step.id, status="skipped",
+                            detail=("skipped on resume: this step already ran "
+                                    "before the run paused"),
+                        ))
+                        step_count += 1
+                        continue
                 if step_count >= req.max_steps:
                     return _finish("aborted", step_results, page, "max_steps reached", started)
                 if time.monotonic() - started > req.max_seconds:
@@ -678,9 +745,12 @@ def _run_sequence_step(
     from any sub-action aborts the sequence immediately.
     """
     raw_condition = step.success_condition or step.details.get("success_condition", "")
+    resolved_condition = ""
     if raw_condition:
         resolved_condition = _resolve_today(_interpolate(raw_condition, variables))
-        if browser_mode.check_sequence_condition(page, resolved_condition):
+        # Skip ONLY on a definite True. None means "cannot evaluate this
+        # phrasing", which must not be treated as satisfied.
+        if browser_mode.check_sequence_condition(page, resolved_condition) is True:
             return StepResult(
                 step_id=step.id,
                 status="succeeded",
@@ -721,6 +791,38 @@ def _run_sequence_step(
                 trace=seq_trace,
             )
 
+    # OUTCOME VERIFICATION, but only when this sequence actually PERSISTED the
+    # value. Plans split an inline edit across two steps: the sequence opens
+    # the pencil and sets the field, then a SEPARATE Save step commits it. The
+    # sequence's success_condition describes the saved, read-only state, which
+    # by definition cannot hold yet while the field is still in edit mode.
+    #
+    # Verifying here regardless would fail every such step, pause the run, and
+    # look exactly like the agent giving up right after opening the record.
+    # So we verify only if a click_save_footer ran; otherwise the condition
+    # belongs to the Save step that follows, which checks it there.
+    saves_inline = any(sub.get("kind") == "click_save_footer" for sub in sub_actions)
+    if resolved_condition and saves_inline:
+        verified = browser_mode.check_sequence_condition(page, resolved_condition)
+        if verified is False:
+            return StepResult(
+                step_id=step.id,
+                status="failed",
+                detail=(
+                    f"sub-actions all reported OK but the success condition is "
+                    f"NOT satisfied after saving: {resolved_condition[:160]} | "
+                    + " | ".join(observations)
+                ),
+                trace=seq_trace,
+            )
+        if verified is True:
+            observations.append("[verified] success condition satisfied after the sequence")
+    elif resolved_condition:
+        observations.append(
+            "[unverified] this sequence does not save; the following Save step "
+            "verifies the persisted value"
+        )
+
     return StepResult(
         step_id=step.id,
         status="succeeded",
@@ -738,6 +840,16 @@ def _run_step(page: Page, llm: GeminiClient, step: Step, req: RunRequest, *, var
         return StepResult(step_id=step.id, status="succeeded", detail=f"waited {secs}s")
 
     if step.kind == StepKind.HUMAN_INPUT:
+        # On a RESUMED run the human's answer arrives in ${human_response}.
+        # Without this check the step would pause again on exactly the input
+        # it just received, and the run could never get past it.
+        answer = (variables or {}).get("human_response")
+        if answer:
+            return StepResult(
+                step_id=step.id, status="succeeded",
+                detail=f"answered by a human: {str(answer)[:200]}",
+                extracted={step.details.get("variable_name") or "human_response": answer},
+            )
         return StepResult(step_id=step.id, status="paused",
                           detail=str(step.details.get("prompt", "human input requested")),
                           pause_reason="human_input")
@@ -772,8 +884,21 @@ def _run_step(page: Page, llm: GeminiClient, step: Step, req: RunRequest, *, var
             )
 
     if step.kind == StepKind.NOTIFY:
-        return StepResult(step_id=step.id, status="succeeded",
-                          detail=f"(notify simulated): {step.details.get('message', '')}")
+        # NOT IMPLEMENTED. There is no delivery channel wired up (no email,
+        # no Slack), so nothing is sent. Reporting "succeeded" here would be
+        # a false success: the run would claim it notified someone when no
+        # message left the machine. `skipped` is the honest status — the work
+        # did not happen, and it does not fail the run either.
+        channel = step.details.get("channel", "dashboard")
+        return StepResult(
+            step_id=step.id,
+            status="skipped",
+            detail=(
+                f"notify is not implemented — NO message was sent "
+                f"(channel={channel!r}). Message was: "
+                f"{str(step.details.get('message', ''))[:200]!r}"
+            ),
+        )
 
     if step.kind == StepKind.NAVIGATE:
         url = step.details.get("url")

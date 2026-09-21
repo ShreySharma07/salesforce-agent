@@ -8,9 +8,14 @@ what a human did to unstick the agent. These three operations close that loop.
 
 Resume is deliberately NOT "reattach to the old container". Sandboxes are
 one-per-run and destroyed on teardown, so resuming starts a FRESH run that
-fast-forwards to the paused step carrying the earlier run's variables. That
-works precisely because state-changing steps carry a `success_condition`:
-anything already done is observed and skipped rather than repeated.
+carries the earlier run's variables forward.
+
+The fresh container also has a blank browser: no session, no open record. So
+the new run does not simply jump to the paused step. Steps before it are
+handled in two ways: data-changing steps are skipped, because the paused run
+already performed them, while context steps (open_app, navigate, wait) are
+REPLAYED to rebuild the session and get back to the right page. See
+`_is_context_step` in the sandbox executor.
 """
 from __future__ import annotations
 
@@ -85,6 +90,7 @@ async def cancel_run(run: Run, *, user_id: str) -> Run | None:
     run.status = RunStatus.CANCELED
     run.finished_at = datetime.utcnow()
     run.error = run.error or "canceled by user"
+    run.mcp_token_hash = None   # revoke: the container is gone
     await get_repository().save_run(run, user_id=user_id)
     log.info("run %s canceled by %s", run.id, user_id)
     return run
@@ -172,6 +178,10 @@ async def resume_run(
         triggered_by=RunTrigger.MANUAL,
         triggered_by_user=user_id,
         status=RunStatus.PROVISIONING,
+        # Continue the SAME approved plan the paused run was executing. Re-
+        # reading the plan here would let an edit made during the pause slip
+        # into a run the user already approved and already partly executed.
+        plan_snapshot=run.plan_snapshot,
     )
     await repo.save_run(new_run, user_id=user_id)
 

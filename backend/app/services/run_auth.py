@@ -14,8 +14,18 @@ import hmac
 
 from fastapi import HTTPException
 
-from app.schemas.run import Run
+from app.schemas.run import Run, RunStatus
 from app.services.run_repo import get_repository
+
+# A run token is only valid while its run is actually executing. Once the run
+# reaches any terminal state the container is gone, so a token still being
+# presented means it leaked (from a log, a crash dump, a stale process) and
+# must be refused rather than honoured.
+ACTIVE_RUN_STATUSES = {
+    RunStatus.QUEUED,
+    RunStatus.PROVISIONING,
+    RunStatus.RUNNING,
+}
 
 
 def hash_run_token(token: str) -> str:
@@ -47,7 +57,42 @@ async def authenticate_run(run_id: str | None, authorization: str | None) -> Run
         raise HTTPException(401, "invalid run token")
     if not hmac.compare_digest(hash_run_token(token), run.mcp_token_hash):
         raise HTTPException(401, "invalid run token")
+    _require_active(run)
     return run
+
+
+def _require_active(run: Run) -> None:
+    """Refuse a token whose run has already finished, failed or been canceled."""
+    if run.status not in ACTIVE_RUN_STATUSES:
+        raise HTTPException(
+            401,
+            f"run {run.id} is {run.status.value}; its token is no longer valid",
+        )
+
+
+def authorized_mcp_tools(run: Run) -> set[tuple[str, str]] | None:
+    """The (server, tool) pairs this run's approved plan actually declares.
+
+    A run token should only buy what the approved plan asked for. Without this
+    a leaked token could call ANY registered MCP tool as the run's owner, for
+    example reading the whole Salesforce org from a plan that was approved
+    only to update one field.
+
+    Returns None when the run carries no plan snapshot, which only happens for
+    runs created before snapshots existed; the caller then falls back to
+    permitting the call and logs it.
+    """
+    if not run.plan_snapshot:
+        return None
+    allowed: set[tuple[str, str]] = set()
+    for step in (run.plan_snapshot.get("steps") or []):
+        if step.get("kind") != "mcp_call":
+            continue
+        details = step.get("details") or {}
+        server, tool = details.get("server"), details.get("tool")
+        if server and tool:
+            allowed.add((str(server).lower(), str(tool)))
+    return allowed
 
 
 async def authenticate_run_by_token(run_token: str | None) -> Run:
@@ -58,4 +103,5 @@ async def authenticate_run_by_token(run_token: str | None) -> Run:
     run = await get_repository().get_run_by_token_hash(hash_run_token(run_token))
     if run is None:
         raise HTTPException(401, "invalid run token")
+    _require_active(run)
     return run

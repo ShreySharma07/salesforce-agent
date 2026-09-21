@@ -195,9 +195,18 @@ async def lifespan(app: FastAPI):
     await _ensure_default_user()
     await _fail_orphaned_runs()
     _check_sandbox_image()
+    try:
+        sandbox_model = settings.effective_sandbox_model()
+    except ValueError as e:
+        # Misconfiguration must be loud at boot, not at the first model call
+        # halfway through a run.
+        log.error("SANDBOX LLM MISCONFIGURED: %s", e)
+        sandbox_model = "MISCONFIGURED"
     log.info(
-        "Backend up. llm=%s sandbox=%s db=%s",
-        settings.llm_provider, settings.sandbox_runner,
+        "Backend up. plan-pipeline=%s/%s sandbox-loop=%s/%s runner=%s db=%s",
+        settings.llm_provider, settings.llm_model,
+        settings.effective_sandbox_provider(), sandbox_model,
+        settings.sandbox_runner,
         "sqlite" if "sqlite" in settings.database_url else "postgres",
     )
     yield
@@ -233,9 +242,19 @@ def create_app() -> FastAPI:
     @app.get("/health")
     def health() -> dict:
         s = get_settings()
+        # Both model jobs are reported: they can be served by different
+        # providers, and "which model is actually driving the browser?" is
+        # the first question when a run behaves unexpectedly.
+        try:
+            sandbox_model = s.effective_sandbox_model()
+        except ValueError as e:
+            sandbox_model = f"MISCONFIGURED: {e}"
         return {
             "status": "ok",
             "llm_provider": s.llm_provider,
+            "llm_model": s.llm_model,
+            "sandbox_llm_provider": s.effective_sandbox_provider(),
+            "sandbox_llm_model": sandbox_model,
             "sandbox_runner": s.sandbox_runner,
             "db": "sqlite" if "sqlite" in s.database_url else "postgres",
             "vault_configured": bool(s.vault_encryption_key),

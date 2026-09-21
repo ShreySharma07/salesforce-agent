@@ -170,7 +170,9 @@ def _apply_cost(run: Run) -> None:
     run.cost.llm_calls = calls
     run.cost.input_tokens = in_tok
     run.cost.output_tokens = out_tok
-    run.cost.cost_usd = round(estimate_cost(get_settings().llm_model, in_tok, out_tok), 6)
+    # Price with the model that actually ran the loop.
+    run.cost.cost_usd = round(
+        estimate_cost(get_settings().effective_sandbox_model(), in_tok, out_tok), 6)
 
 
 def _status_for(sandbox_status: str | None, step_results: list[dict], error: str | None) -> RunStatus:
@@ -181,6 +183,8 @@ def _status_for(sandbox_status: str | None, step_results: list[dict], error: str
     between BUDGET_EXCEEDED and FAILED.
     """
     if sandbox_status == "completed":
+        # Anything other than "succeeded" (failed, skipped, paused) means the
+        # run did not do everything the plan asked for.
         has_failures = any(sr.get("status") != "succeeded" for sr in step_results)
         return RunStatus.COMPLETED_WITH_FAILURES if has_failures else RunStatus.COMPLETED
     if sandbox_status == "paused":
@@ -190,6 +194,29 @@ def _status_for(sandbox_status: str | None, step_results: list[dict], error: str
         if "quota" in low or "budget" in low:
             return RunStatus.BUDGET_EXCEEDED
     return RunStatus.FAILED
+
+
+async def _record_run_outcome(auto, run: Run, *, user_id: str) -> None:
+    """Fold one finished run into its automation's counters, exactly once.
+
+    Clean, partial and failed are counted separately. A run with failed or
+    skipped steps is NOT a success: rolling it into `successful_runs` makes a
+    flaky automation look perfect and hides the one thing worth surfacing.
+    """
+    if auto is None:
+        return
+    auto.total_runs += 1
+    if run.status == RunStatus.COMPLETED:
+        auto.successful_runs += 1
+    elif run.status == RunStatus.COMPLETED_WITH_FAILURES:
+        auto.partial_runs += 1
+    else:
+        auto.failed_runs += 1
+    auto.last_run_at = run.finished_at
+    try:
+        await get_repository().save_automation(auto, user_id=user_id)
+    except Exception as e:
+        log.warning("could not update counters for automation %s: %s", auto.id, e)
 
 
 async def execute_run(
@@ -220,7 +247,24 @@ async def execute_run(
     # The background task runs detached, so ownership comes from the
     # automation it loads. Used to stamp the run and to scope memory.
     user_id = (auto.user_id if auto else None) or settings.default_user_id
-    plan: Plan | None = await repo.get_plan(auto.plan_id) if auto else None
+
+    # Execute the APPROVED SNAPSHOT captured when this run was queued. Falling
+    # back to a live read is only for runs created before snapshots existed;
+    # a live read is exactly what we do not want, because the plan row may
+    # have been edited or re-approved since this run was authorized.
+    plan: Plan | None = None
+    if run.plan_snapshot:
+        try:
+            plan = Plan.model_validate(run.plan_snapshot)
+            log.info("run %s executing approved snapshot of plan %s v%d",
+                     run.id, plan.id, plan.version)
+        except Exception as e:
+            log.error("run %s has an unreadable plan snapshot: %s", run.id, e)
+    if plan is None and auto is not None:
+        plan = await repo.get_plan(auto.plan_id)
+        if plan is not None:
+            log.warning("run %s has no snapshot — falling back to a live read of plan %s",
+                        run.id, plan.id)
     if plan is None:
         run.status = RunStatus.FAILED
         run.error = "linked plan disappeared"
@@ -237,15 +281,19 @@ async def execute_run(
             run.mcp_token_hash = hashlib.sha256(run_token.encode()).hexdigest()
             await repo.save_run(run, user_id=user_id)
 
+            sandbox_env = {
+                **settings.llm_env_for_sandbox(),
+                "BACKEND_MCP_URL": _backend_url_for_sandbox(),
+                "RUN_ID": run.id,
+                "RUN_TOKEN": run_token,
+                **await _frontdoor_env(user_id, run_token),
+            }
+            if settings.sandbox_vnc_password:
+                sandbox_env["VNC_PASSWORD"] = settings.sandbox_vnc_password
+
             config = SpawnConfig(
                 image=settings.sandbox_image,
-                env={
-                    **settings.llm_env_for_sandbox(),
-                    "BACKEND_MCP_URL": _backend_url_for_sandbox(),
-                    "RUN_ID": run.id,
-                    "RUN_TOKEN": run_token,
-                    **await _frontdoor_env(user_id, run_token),
-                },
+                env=sandbox_env,
                 dev_mount=settings.sandbox_dev_mount,
             )
             handle = await runner.spawn(config)
@@ -301,19 +349,23 @@ async def execute_run(
                 f"{len(run.step_executions)} steps succeeded"
             )
 
-            if auto is not None:
-                auto.total_runs += 1
-                if run.status in (RunStatus.COMPLETED, RunStatus.COMPLETED_WITH_FAILURES):
-                    auto.successful_runs += 1
-                auto.last_run_at = run.finished_at
-                await repo.save_automation(auto, user_id=user_id)
-
         except Exception as e:
             run.status = RunStatus.FAILED
             run.error = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
             run.finished_at = datetime.utcnow()
         finally:
+            # REVOKE the run token. The container is about to be destroyed, so
+            # nothing legitimate can present this token again; clearing the
+            # hash means a copy recovered later from a log or a crash dump
+            # cannot be replayed against /mcp or the frontdoor.
+            run.mcp_token_hash = None
+            run.finished_at = run.finished_at or datetime.utcnow()
             await repo.save_run(run, user_id=user_id)
+            # Count the run HERE, not in the happy path: a run that dies while
+            # spawning the container never reaches the end of the try block,
+            # and it was previously not counted at all — the automation showed
+            # zero runs immediately after a failure the user just watched.
+            await _record_run_outcome(auto, run, user_id=user_id)
             if handle is not None:
                 try:
                     await runner.teardown(handle)

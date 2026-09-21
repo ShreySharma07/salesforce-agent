@@ -1214,13 +1214,23 @@ def _lookup_pill_has_value(page: "Page", text: str) -> bool:
 # SEQUENCE step primitives -- deterministic sub-actions (no LLM involvement)
 # ---------------------------------------------------------------------------
 
-def check_sequence_condition(page: "Page", condition: str) -> bool:
+def check_sequence_condition(page: "Page", condition: str) -> bool | None:
     """Lightweight Playwright check for SEQUENCE step success conditions.
 
-    Covers the two patterns used in inline-edit sequences:
-      "shows '...' as a linked-record pill" → _lookup_pill_has_value
-      "shows '...' in read-only view"        → visible text check
-    Returns False (don't skip) for unknown patterns.
+    Tri-state on purpose, because "I checked and it is not satisfied" and "I
+    have no idea how to check this" must not be conflated:
+
+      True   the condition is satisfied right now
+      False  the condition was checked and is NOT satisfied
+      None   this phrasing is not one the checker understands
+
+    Callers skip a step only on True, and may fail a step only on False. A
+    None must never fail a step, or every unrecognised phrasing would report
+    a false failure.
+
+    Understood patterns (the two used by inline-edit sequences):
+      "shows '...' as a linked-record pill" -> lookup pill check
+      "shows '...' in read-only view"       -> visible text check
     """
     import re as _re
     m = _re.search(r"shows '([^']+)' as a linked-record pill", condition, _re.I)
@@ -1233,7 +1243,7 @@ def check_sequence_condition(page: "Page", condition: str) -> bool:
             return page.get_by_text(val, exact=True).first.is_visible(timeout=500)
         except Exception:
             return False
-    return False
+    return None
 
 
 def execute_sequence_sub_action(page: "Page", kind: str, sub: dict) -> str:
