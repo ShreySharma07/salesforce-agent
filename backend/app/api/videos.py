@@ -48,6 +48,7 @@ log = logging.getLogger(__name__)
 # arbitrary uploaded bytes.
 ALLOWED_SUFFIXES = {".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v"}
 MAX_UPLOAD_BYTES = 512 * 1024 * 1024  # 512 MB
+UPLOAD_CHUNK_BYTES = 1024 * 1024       # 1 MB
 
 
 class VideoStatus(BaseModel):
@@ -106,17 +107,26 @@ async def upload_video(
             f"unsupported file type {suffix!r}; expected one of {sorted(ALLOWED_SUFFIXES)}",
         )
 
-    data = await file.read()
-    if not data:
-        raise HTTPException(400, "uploaded file is empty")
-    if len(data) > MAX_UPLOAD_BYTES:
-        raise HTTPException(
-            413, f"file is {len(data) // 1_048_576} MB; limit is {MAX_UPLOAD_BYTES // 1_048_576} MB",
-        )
-
     video_id = uuid.uuid4().hex[:12]
     source_key = f"videos/{video_id}/source{suffix}"
-    get_storage().write_bytes(source_key, data)
+    # Stream to disk in chunks and stop at the limit, so an oversized upload
+    # never has to fit in memory.
+    dest = get_storage().local_path(source_key)
+    size = 0
+    try:
+        with dest.open("wb") as out:
+            while chunk := await file.read(UPLOAD_CHUNK_BYTES):
+                size += len(chunk)
+                if size > MAX_UPLOAD_BYTES:
+                    raise HTTPException(
+                        413, f"file exceeds the {MAX_UPLOAD_BYTES // 1_048_576} MB limit",
+                    )
+                out.write(chunk)
+        if size == 0:
+            raise HTTPException(400, "uploaded file is empty")
+    except HTTPException:
+        dest.unlink(missing_ok=True)
+        raise
 
     status = VideoStatus(
         video_id=video_id, user_id=user.id, status="uploaded",

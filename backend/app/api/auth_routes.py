@@ -7,7 +7,7 @@ clears the cookie.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Cookie, Depends, HTTPException, Response
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response
 
 from app.config import get_settings
 from app.schemas.auth import (
@@ -18,8 +18,21 @@ from app.services.oauth.service import (
     register, login, logout, AuthError, SESSION_TTL,
 )
 from app.services.oauth.sql_store import get_user_store, get_session_store
+from app.services.rate_limit import AuthRateLimits
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+
+def _enforce_rate_limit(request: Request, email: str) -> None:
+    """429 once a client IP or a target email exceeds its attempt budget."""
+    limits: AuthRateLimits | None = getattr(request.app.state, "auth_rate_limits", None)
+    if limits is None:
+        limits = request.app.state.auth_rate_limits = AuthRateLimits()
+    ip = request.client.host if request.client else "unknown"
+    ok_ip = limits.per_ip.hit(f"ip:{ip}")
+    ok_email = limits.per_email.hit(f"email:{email.lower()}")
+    if not (ok_ip and ok_email):
+        raise HTTPException(429, "too many attempts; try again later")
 
 
 def _set_session_cookie(response: Response, token: str) -> None:
@@ -37,7 +50,8 @@ def _set_session_cookie(response: Response, token: str) -> None:
 
 
 @router.post("/register", response_model=UserPublic)
-async def register_route(body: RegisterBody, response: Response):
+async def register_route(body: RegisterBody, request: Request, response: Response):
+    _enforce_rate_limit(request, body.email)
     try:
         user = await register(
             get_user_store(), email=body.email, password=body.password,
@@ -57,7 +71,8 @@ async def register_route(body: RegisterBody, response: Response):
 
 
 @router.post("/login", response_model=UserPublic)
-async def login_route(body: LoginBody, response: Response):
+async def login_route(body: LoginBody, request: Request, response: Response):
+    _enforce_rate_limit(request, body.email)
     try:
         user, token = await login(
             get_user_store(), get_session_store(),

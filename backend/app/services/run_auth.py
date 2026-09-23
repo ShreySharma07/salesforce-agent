@@ -6,6 +6,10 @@ The backend mints a random RUN_TOKEN when it spawns a sandbox and stores only
 its SHA-256 hash on the Run row. The sandbox sends the raw token back on every
 call; we hash it and compare in constant time. A token is valid only for the
 run it was minted for, and a run with no stored hash is never accepted.
+
+A token also dies with its run: once the run leaves PROVISIONING/RUNNING
+(completed, failed, canceled, paused, ...) the sandbox is gone, so any
+further use of the token can only be a leaked copy and is refused.
 """
 from __future__ import annotations
 
@@ -14,8 +18,18 @@ import hmac
 
 from fastapi import HTTPException
 
-from app.schemas.run import Run
+from app.schemas.run import Run, RunStatus
 from app.services.run_repo import get_repository
+
+
+# Only a run whose sandbox is (or is about to be) alive may use its token.
+LIVE_RUN_STATUSES = frozenset({RunStatus.PROVISIONING, RunStatus.RUNNING})
+
+
+def _require_live(run: Run) -> Run:
+    if run.status not in LIVE_RUN_STATUSES:
+        raise HTTPException(401, "run token expired (run is no longer active)")
+    return run
 
 
 def hash_run_token(token: str) -> str:
@@ -47,15 +61,4 @@ async def authenticate_run(run_id: str | None, authorization: str | None) -> Run
         raise HTTPException(401, "invalid run token")
     if not hmac.compare_digest(hash_run_token(token), run.mcp_token_hash):
         raise HTTPException(401, "invalid run token")
-    return run
-
-
-async def authenticate_run_by_token(run_token: str | None) -> Run:
-    """Variant for endpoints that only receive the raw token (frontdoor
-    redirects carry it as a query parameter). Looks the run up by hash."""
-    if not run_token:
-        raise HTTPException(401, "run_token required")
-    run = await get_repository().get_run_by_token_hash(hash_run_token(run_token))
-    if run is None:
-        raise HTTPException(401, "invalid run token")
-    return run
+    return _require_live(run)

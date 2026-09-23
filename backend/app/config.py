@@ -105,13 +105,16 @@ class Settings(BaseSettings):
     # ----- Default user (single-user mode) -----
     default_user_id: str = "user_local"
 
-    auth_dev_mode: bool = True
+    # DANGER: when true, every unauthenticated request is treated as the
+    # default user. Off by default so a deployment fails closed; enable only
+    # for local single-user development (AUTH_DEV_MODE=true).
+    auth_dev_mode: bool = False
 
     # ----- Budget defaults -----
     # Enforced per run by the LLM proxy (app/core/budget). A run that exceeds
     # either ceiling is refused further model calls and aborts.
-    default_max_model_calls_per_run: int = 80000
-    default_max_usd_per_run: float = 900.00
+    default_max_model_calls_per_run: int = 500
+    default_max_usd_per_run: float = 10.00
 
     def cors_origin_list(self) -> list[str]:
         """Parse `cors_origins` into the list CORSMiddleware expects."""

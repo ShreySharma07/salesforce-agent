@@ -13,12 +13,17 @@ Note: the sandbox no longer holds an LLM API key. LLM calls are proxied
 through the backend (/sandbox/llm/generate), so the only startup
 requirement is BACKEND_MCP_URL — the address the sandbox uses to reach
 the backend for both LLM and MCP calls.
+
+/run drives a browser that may be logged into the user's Salesforce, so it
+requires `Authorization: Bearer <RUN_TOKEN>` — the same per-run token the
+backend injected at spawn. Without a configured RUN_TOKEN it refuses.
 """
 from __future__ import annotations
 
+import hmac
 import os
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse
 
 from sandbox_agent.executor import run_plan
@@ -33,8 +38,21 @@ def health() -> dict[str, str]:
     return {"status": "ok", "display": os.getenv("DISPLAY", "(unset)")}
 
 
+def _require_run_token(authorization: str | None) -> None:
+    """401 unless the caller presents this container's RUN_TOKEN."""
+    expected = os.getenv("RUN_TOKEN", "")
+    if not expected:
+        raise HTTPException(status_code=503, detail="RUN_TOKEN not configured in the sandbox")
+    presented = ""
+    if authorization and authorization.startswith("Bearer "):
+        presented = authorization.removeprefix("Bearer ").strip()
+    if not hmac.compare_digest(presented.encode(), expected.encode()):
+        raise HTTPException(status_code=401, detail="invalid run token")
+
+
 @app.post("/run", response_model=RunResponse)
-def run(req: RunRequest) -> RunResponse:
+def run(req: RunRequest, authorization: str | None = Header(default=None)) -> RunResponse:
+    _require_run_token(authorization)
     # The sandbox reaches the backend for LLM (proxy) and MCP calls.
     # Without BACKEND_MCP_URL it cannot function — fail fast and clearly.
     if not os.getenv("BACKEND_MCP_URL"):

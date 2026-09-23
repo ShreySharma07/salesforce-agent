@@ -56,7 +56,9 @@ class RegisterBody(BaseModel):
 
 class LoginBody(BaseModel):
     email: EmailStr
-    password: str
+    # Bounded like RegisterBody: hashing an unbounded password is a cheap
+    # way to burn server CPU.
+    password: str = Field(max_length=200)
 
 
 class UserPublic(BaseModel):

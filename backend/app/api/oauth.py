@@ -13,8 +13,9 @@ Configuration prerequisites for each provider:
 """
 from __future__ import annotations
 
-import uuid
+import html
 from datetime import datetime, timedelta
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -37,6 +38,24 @@ from app.services.oauth.providers import (
 
 
 router = APIRouter(prefix="/oauth", tags=["oauth"])
+
+# A state token older than this is rejected, not just swept.
+STATE_TTL = timedelta(minutes=10)
+
+
+def _safe_return_to(return_to: str | None) -> str | None:
+    """Accept only a same-site relative path or a URL on an allowed frontend
+    origin (CORS_ORIGINS). Anything else would make the callback an open
+    redirect off our domain."""
+    if not return_to:
+        return None
+    if return_to.startswith("/") and not return_to.startswith("//") and "\\" not in return_to:
+        return return_to
+    parts = urlsplit(return_to)
+    origin = f"{parts.scheme}://{parts.netloc}"
+    if parts.scheme in ("http", "https") and origin in get_settings().cors_origin_list():
+        return return_to
+    raise HTTPException(400, "return_to must be a relative path or an allowed frontend origin")
 
 
 class ProviderInfo(BaseModel):
@@ -100,6 +119,7 @@ async def connect(
             f"{provider.upper()}_CLIENT_SECRET in backend/.env first."
         )
 
+    return_to = _safe_return_to(return_to)
     state = vault.random_state_token()
     pkce_verifier = vault.random_pkce_verifier() if provider_cfg.use_pkce else None
     redirect_uri = settings.oauth_redirect_uri(provider)
@@ -155,10 +175,14 @@ async def callback(
     if state_row.provider != provider:
         raise HTTPException(400, "provider mismatch on state token")
 
-    # Sweep expired state rows opportunistically
-    await session.execute(
-        delete(OAuthState).where(OAuthState.created_at < datetime.utcnow() - timedelta(minutes=10))
-    )
+    # Sweep expired state rows opportunistically — including this one if it
+    # is stale, which must then be refused rather than honored.
+    cutoff = datetime.utcnow() - STATE_TTL
+    expired = state_row.created_at is not None and state_row.created_at < cutoff
+    await session.execute(delete(OAuthState).where(OAuthState.created_at < cutoff))
+    if expired:
+        await session.commit()
+        raise HTTPException(400, "invalid or expired state token")
 
     provider_cfg = get_provider(provider)
     client_id, client_secret = get_provider_credentials(provider)
@@ -195,8 +219,14 @@ async def callback(
     await session.delete(state_row)
     await session.flush()
 
-    if state_row.return_to:
-        return RedirectResponse(url=state_row.return_to, status_code=302)
+    # Re-checked here too: rows written before validation existed may hold
+    # arbitrary URLs.
+    try:
+        return_to = _safe_return_to(state_row.return_to)
+    except HTTPException:
+        return_to = None
+    if return_to:
+        return RedirectResponse(url=return_to, status_code=302)
     return _result_page(
         f"{provider.capitalize()} connected",
         f"You can close this tab. The agent platform now has access to {provider}.",
@@ -221,10 +251,16 @@ async def disconnect(provider: str, session: AsyncSession = Depends(get_session)
 # ---------------------------------------------------------------------------
 
 def _result_page(title: str, msg: str, *, ok: bool) -> HTMLResponse:
-    """Minimal HTML landing page shown after the OAuth callback completes."""
+    """Minimal HTML landing page shown after the OAuth callback completes.
+
+    `title` and `msg` carry attacker-controllable text (the provider path
+    segment, the provider's error query params, exception strings), so both
+    are HTML-escaped before interpolation."""
+    title = html.escape(title)
+    msg = html.escape(msg)
     color = "#22c55e" if ok else "#ef4444"
     icon = "✓" if ok else "✗"
-    html = f"""<!doctype html>
+    page = f"""<!doctype html>
 <html><head><title>{title}</title>
 <style>
   body {{ font-family: -apple-system, system-ui, sans-serif;
@@ -239,4 +275,4 @@ def _result_page(title: str, msg: str, *, ok: bool) -> HTMLResponse:
   <h1>{title}</h1>
   <p>{msg}</p>
 </body></html>"""
-    return HTMLResponse(content=html, status_code=200 if ok else 400)
+    return HTMLResponse(content=page, status_code=200 if ok else 400)
