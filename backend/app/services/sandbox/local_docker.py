@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import secrets
 import socket
 import subprocess
 import uuid
@@ -50,28 +51,38 @@ class LocalDockerRunner(SandboxRunner):
         sandbox_id = f"sandbox_{uuid.uuid4().hex[:12]}"
         agent_port = _find_free_port()
         novnc_port = _find_free_port()
+        # Per-sandbox VNC password: the live view is a browser logged into
+        # the user's Salesforce, so it must never be open to whoever can
+        # reach the port. (VNC auth only uses the first 8 characters.)
+        vnc_password = secrets.token_urlsafe(6)[:8]
+        env = {**config.env, "VNC_PASSWORD": vnc_password}
 
-        # Build docker run command. Each -e flag passes one env var.
+        # Build docker run command. Ports are published on loopback only:
+        # the agent API and the live view are for this host, not the LAN.
+        # Env values are passed via the process environment (`-e KEY` with no
+        # value) so secrets like RUN_TOKEN never appear in argv or our logs.
         cmd = [
             "docker", "run", "-d",
             "--name", sandbox_id,
-            "-p", f"{agent_port}:8000",
-            "-p", f"{novnc_port}:6080",
+            "-p", f"127.0.0.1:{agent_port}:8000",
+            "-p", f"127.0.0.1:{novnc_port}:6080",
             f"--shm-size={config.shm_size_mb}m",
         ]
-        for key, value in config.env.items():
-            cmd += ["-e", f"{key}={value}"]
+        for key in env:
+            cmd += ["-e", key]
         if config.dev_mount:
             cmd += ["-v", f"{config.dev_mount}:/opt/sandbox_agent"]
         cmd.append(config.image)
 
-        # Log the exact command we're running so we can replicate it manually
+        # Log the command (it carries env var NAMES only, never values).
         import logging
+        import os
         log = logging.getLogger("sandbox")
         log.info("Running: %s", " ".join(cmd))
 
         result = await asyncio.to_thread(
-            subprocess.run, cmd, capture_output=True, text=True
+            subprocess.run, cmd, capture_output=True, text=True,
+            env={**os.environ, **env},
         )
         if result.returncode != 0:
             raise RuntimeError(
@@ -91,12 +102,19 @@ class LocalDockerRunner(SandboxRunner):
         return SandboxHandle(
             sandbox_id=sandbox_id,
             api_url=f"http://localhost:{agent_port}",
-            live_view_url=f"http://localhost:{novnc_port}/vnc.html",
+            # Only the run's owner can read live_view_url (runs are scoped),
+            # so the per-sandbox VNC password rides along for autoconnect.
+            live_view_url=(
+                f"http://localhost:{novnc_port}/vnc.html"
+                f"?autoconnect=1&password={vnc_password}"
+            ),
             runner_kind=self.runner_kind,
             metadata={
                 "container_id": container_id,
                 "agent_port": agent_port,
                 "novnc_port": novnc_port,
+                # The sandbox's /run endpoint requires the run token.
+                "run_token": config.env.get("RUN_TOKEN", ""),
             },
         )
 
@@ -157,8 +175,9 @@ class LocalDockerRunner(SandboxRunner):
         # (browser close, response serialisation).  Never let the HTTP client
         # race the sandbox to a timeout; the sandbox enforces its own limits.
         http_timeout = max_seconds + 600 + 120  # 600 = max per-step default
+        headers = {"Authorization": f"Bearer {handle.metadata.get('run_token', '')}"}
         async with httpx.AsyncClient(timeout=http_timeout) as client:
-            r = await client.post(f"{handle.api_url}/run", json=body)
+            r = await client.post(f"{handle.api_url}/run", json=body, headers=headers)
             if r.status_code >= 400:
                 raise RuntimeError(
                     f"sandbox /run returned {r.status_code}: {r.text[:2000]}"

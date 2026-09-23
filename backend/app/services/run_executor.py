@@ -81,25 +81,22 @@ def _backend_url_for_sandbox() -> str:
     return settings.public_backend_base_url
 
 
-async def _frontdoor_env(user_id: str, run_token: str) -> dict[str, str]:
+async def _frontdoor_env(user_id: str) -> dict[str, str]:
     """Per-provider frontdoor paths for the providers this user has connected.
 
-    The sandbox's `open_app` action navigates to one of these; the backend
-    validates the token and 302s into a logged-in session. The provider's
-    real access token never leaves the backend.
+    The sandbox's `open_app` action POSTs to one of these with its run token
+    in the Authorization header; the backend returns a one-time logged-in URL
+    for the browser. The provider's real access token never leaves the
+    backend, and the run token never appears in a URL.
     """
     env: dict[str, str] = {}
     async with get_sessionmaker()() as session:
         for provider in _FRONTDOOR_PROVIDERS:
             row = await get_credential_row(session, user_id=user_id, provider=provider)
             if row is not None and row.kind == "oauth":
-                # ret_url lands the browser on the neutral home page regardless
-                # of which app was open in the last session.
-                env[f"{provider.upper()}_FRONTDOOR_PATH"] = (
-                    f"/sandbox/frontdoor/{provider}"
-                    f"?run_token={run_token}"
-                    f"&ret_url=%2Flightning%2Fpage%2Fhome"
-                )
+                # The backend lands the browser on the neutral home page
+                # regardless of which app was open in the last session.
+                env[f"{provider.upper()}_FRONTDOOR_PATH"] = f"/sandbox/frontdoor/{provider}"
     return env
 
 
@@ -244,7 +241,7 @@ async def execute_run(
                     "BACKEND_MCP_URL": _backend_url_for_sandbox(),
                     "RUN_ID": run.id,
                     "RUN_TOKEN": run_token,
-                    **await _frontdoor_env(user_id, run_token),
+                    **await _frontdoor_env(user_id),
                 },
                 dev_mount=settings.sandbox_dev_mount,
             )

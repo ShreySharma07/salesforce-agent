@@ -21,6 +21,7 @@ Auth:
 """
 from __future__ import annotations
 
+import re
 from typing import Any
 from urllib.parse import urlencode
 
@@ -37,6 +38,10 @@ from app.services.mcp.base import (
 
 
 API_VERSION = "v60.0"
+
+# Standard/custom sObject API names, and 15/18-char Salesforce record IDs.
+_SOBJECT_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,79}")
+_RECORD_ID_RE = re.compile(r"[A-Za-z0-9]{15}(?:[A-Za-z0-9]{3})?")
 
 
 class SalesforceMCPServer(MCPServer):
@@ -190,6 +195,19 @@ class SalesforceMCPServer(MCPServer):
         missing = [k for k in required if k not in args]
         if missing:
             raise MCPInvalidArgs(f"missing required args: {missing}")
+        # object_type / id are spliced into the REST path. An LLM-supplied
+        # value like "../../sobjects/User" or "Lead?x=" would otherwise reach
+        # arbitrary Salesforce endpoints with the user's token.
+        if "object_type" in args and not _SOBJECT_RE.fullmatch(str(args["object_type"])):
+            raise MCPInvalidArgs(f"invalid object_type {args['object_type']!r}")
+        if "id" in args and not _RECORD_ID_RE.fullmatch(str(args["id"])):
+            raise MCPInvalidArgs(f"invalid record id {args['id']!r}")
+        if "fields" in args and not isinstance(args["fields"], dict):
+            raise MCPInvalidArgs("fields must be an object")
+        if "soql" in args and not str(args["soql"]).lstrip().upper().startswith("SELECT"):
+            raise MCPInvalidArgs("soql must be a SELECT query")
+        if "sosl" in args and not str(args["sosl"]).lstrip().upper().startswith("FIND"):
+            raise MCPInvalidArgs("sosl must be a FIND search")
 
     async def _create(
         self, client: httpx.AsyncClient, object_type: str, fields: dict[str, Any]

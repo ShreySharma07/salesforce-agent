@@ -147,23 +147,77 @@ def test_llm_proxy_rejects_wrong_token(client, live_run):
 # ---------------------------------------------------------------------------
 
 def test_frontdoor_requires_a_token(client):
-    r = client.get("/sandbox/frontdoor/salesforce", follow_redirects=False)
+    r = client.post("/sandbox/frontdoor/salesforce", json={})
     assert r.status_code == 401
 
 
 def test_frontdoor_rejects_an_invalid_token(client, live_run):
-    r = client.get("/sandbox/frontdoor/salesforce",
-                   params={"run_token": "nope"}, follow_redirects=False)
+    r = client.post("/sandbox/frontdoor/salesforce",
+                    json={"run_id": live_run["run_id"]},
+                    headers={"Authorization": "Bearer nope"})
     assert r.status_code == 401
+
+
+def test_frontdoor_no_longer_accepts_the_token_in_the_url(client, live_run):
+    """A token in a query string lands in access logs; the old GET is gone."""
+    r = client.get("/sandbox/frontdoor/salesforce",
+                   params={"run_token": live_run["token"]}, follow_redirects=False)
+    assert r.status_code == 405
 
 
 def test_frontdoor_with_a_valid_token_fails_on_credentials_not_auth(client, live_run):
     """A valid token gets past auth; the user simply has no Salesforce
     connected, so it fails at the credential step (400) — not 401."""
-    r = client.get("/sandbox/frontdoor/salesforce",
-                   params={"run_token": live_run["token"]}, follow_redirects=False)
+    r = client.post("/sandbox/frontdoor/salesforce",
+                    json={"run_id": live_run["run_id"]},
+                    headers={"Authorization": f"Bearer {live_run['token']}"})
     assert r.status_code == 400
     assert "not connected" in r.text.lower()
+
+
+@pytest.mark.parametrize("ret_url", ["https://evil.example", "//evil.example", "/\\evil"])
+def test_frontdoor_rejects_an_off_org_ret_url(client, live_run, ret_url):
+    r = client.post("/sandbox/frontdoor/salesforce",
+                    json={"run_id": live_run["run_id"], "ret_url": ret_url},
+                    headers={"Authorization": f"Bearer {live_run['token']}"})
+    assert r.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Token lifetime
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("status", [
+    RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELED, RunStatus.PAUSED_FOR_INPUT,
+])
+def test_token_dies_with_its_run(client, live_run, status):
+    """Once the sandbox is gone, a (leaked) token must not work any more."""
+    from app.services.run_repo import get_repository
+
+    repo = get_repository()
+    run = asyncio.run(repo.get_run(live_run["run_id"]))
+    run.status = status
+    asyncio.run(repo.save_run(run, user_id="owner_user"))
+
+    r = client.post(
+        "/mcp/mock/create_record",
+        json={"args": {"type": "Lead"}, "run_id": live_run["run_id"]},
+        headers={"Authorization": f"Bearer {live_run['token']}"},
+    )
+    assert r.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# /sandbox/llm request bounds
+# ---------------------------------------------------------------------------
+
+def test_llm_proxy_caps_max_tokens(client, live_run):
+    r = client.post(
+        "/sandbox/llm/generate",
+        json={"prompt": "hi", "run_id": live_run["run_id"], "max_tokens": 10_000_000},
+        headers={"Authorization": f"Bearer {live_run['token']}"},
+    )
+    assert r.status_code == 422
 
 
 # ---------------------------------------------------------------------------

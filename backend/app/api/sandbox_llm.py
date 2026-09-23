@@ -33,7 +33,7 @@ import time
 from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.config import get_settings
 from app.core.budget import get_budget_tracker
@@ -50,14 +50,20 @@ class QuotaExhaustedError(Exception):
     pass
 
 
+# Bounds on what a sandbox may ask the backend's key to pay for in one call.
+# The agent uses <= 2048 output tokens and one screenshot per call.
+MAX_OUTPUT_TOKENS = 8192
+MAX_IMAGES_PER_CALL = 4
+
+
 class LLMGenerateRequest(BaseModel):
     run_id: str | None = None
     prompt: str
     system: str | None = None
-    images_b64: list[str] = []
+    images_b64: list[str] = Field(default_factory=list, max_length=MAX_IMAGES_PER_CALL)
     json_mode: bool = False
-    max_tokens: int = 1024
-    temperature: float = 0.0
+    max_tokens: int = Field(default=1024, ge=1, le=MAX_OUTPUT_TOKENS)
+    temperature: float = Field(default=0.0, ge=0.0, le=2.0)
 
 
 class LLMGenerateResponse(BaseModel):

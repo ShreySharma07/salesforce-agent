@@ -143,8 +143,15 @@ class MockRunner:
 
 @pytest.fixture
 def client(db, monkeypatch):
-    """TestClient with the sandbox runner replaced by MockRunner."""
+    """TestClient with the sandbox runner replaced by MockRunner.
+
+    These tests drive the API as the local CLI tooling does — without logging
+    in — so they opt into dev mode explicitly (it is off by default)."""
+    from app.config import get_settings
     from app.services import run_executor
+
+    monkeypatch.setenv("AUTH_DEV_MODE", "true")
+    get_settings.cache_clear()
 
     monkeypatch.setattr(run_executor, "get_sandbox_runner", lambda: MockRunner())
     MockRunner.spawn_called = False

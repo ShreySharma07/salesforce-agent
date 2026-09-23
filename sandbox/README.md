@@ -15,15 +15,18 @@ First build takes ~5 minutes (downloading Chromium + Playwright). Subsequent bui
 ## Run
 
 ```bash
+export RUN_TOKEN=$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')
+export VNC_PASSWORD=$(python3 -c 'import secrets; print(secrets.token_urlsafe(6)[:8])')
 docker run --rm -it \
-  -p 6080:6080 -p 8000:8000 \
+  -p 127.0.0.1:6080:6080 -p 127.0.0.1:8000:8000 \
   -e GEMINI_API_KEY="$GEMINI_API_KEY" \
+  -e RUN_TOKEN -e VNC_PASSWORD \
   --shm-size=2g \
   agent-sandbox:latest
 ```
 
-- `-p 6080:6080` exposes noVNC. Open <http://localhost:6080/vnc.html?autoconnect=1> in your browser to watch the desktop.
-- `-p 8000:8000` exposes the agent's HTTP API.
+- `-p 127.0.0.1:6080:6080` exposes noVNC on this machine only. Open <http://localhost:6080/vnc.html?autoconnect=1&password=$VNC_PASSWORD> to watch the desktop. The display is password-protected; without `VNC_PASSWORD` it gets a random one and is effectively locked.
+- `-p 127.0.0.1:8000:8000` exposes the agent's HTTP API on this machine only. `POST /run` requires `Authorization: Bearer $RUN_TOKEN` (and refuses with 503 if the container has no `RUN_TOKEN`).
 - `--shm-size=2g` is necessary because Chromium uses /dev/shm heavily; the default 64MB causes random crashes.
 
 ## Verify
@@ -79,6 +82,7 @@ Save as `demo_plan.json`, then:
 ```bash
 curl -X POST http://localhost:8000/run \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $RUN_TOKEN" \
   -d @demo_plan.json
 ```
 

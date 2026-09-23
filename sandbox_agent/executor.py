@@ -11,6 +11,7 @@ Phase 2b:
 """
 from __future__ import annotations
 
+import ast
 import datetime
 import json
 import logging
@@ -218,14 +219,75 @@ def _step_intent(step: Step, variables: dict[str, Any] | None = None) -> str:
 # Control-flow helpers (DECISION / LOOP)
 # ---------------------------------------------------------------------------
 
+_SAFE_FUNCS = {"len": len, "int": int, "float": float, "str": str, "bool": bool}
+
+_COMPARE_OPS = {
+    ast.Eq: lambda a, b: a == b, ast.NotEq: lambda a, b: a != b,
+    ast.Lt: lambda a, b: a < b, ast.LtE: lambda a, b: a <= b,
+    ast.Gt: lambda a, b: a > b, ast.GtE: lambda a, b: a >= b,
+    ast.In: lambda a, b: a in b, ast.NotIn: lambda a, b: a not in b,
+    ast.Is: lambda a, b: a is b, ast.IsNot: lambda a, b: a is not b,
+}
+
+
+class _UnsafeCondition(ValueError):
+    pass
+
+
+def _safe_eval(node: ast.AST, variables: dict[str, Any]) -> Any:
+    """Evaluate a whitelisted expression AST. No attribute access, no
+    arbitrary calls, no comprehensions — so plan text cannot reach Python
+    internals the way `eval` (even with empty builtins) allows."""
+    if isinstance(node, ast.Expression):
+        return _safe_eval(node.body, variables)
+    if isinstance(node, ast.Constant):
+        return node.value
+    if isinstance(node, ast.Name):
+        if node.id in variables:
+            return variables[node.id]
+        if node.id in ("True", "False", "None"):
+            return {"True": True, "False": False, "None": None}[node.id]
+        raise NameError(node.id)
+    if isinstance(node, (ast.List, ast.Tuple)):
+        return [_safe_eval(e, variables) for e in node.elts]
+    if isinstance(node, ast.BoolOp):
+        values = (_safe_eval(v, variables) for v in node.values)
+        return all(values) if isinstance(node.op, ast.And) else any(values)
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.Not, ast.USub)):
+        operand = _safe_eval(node.operand, variables)
+        return (not operand) if isinstance(node.op, ast.Not) else -operand
+    if isinstance(node, ast.Compare):
+        left = _safe_eval(node.left, variables)
+        for op, comparator in zip(node.ops, node.comparators):
+            right = _safe_eval(comparator, variables)
+            if not _COMPARE_OPS[type(op)](left, right):
+                return False
+            left = right
+        return True
+    if isinstance(node, ast.Subscript):
+        container = _safe_eval(node.value, variables)
+        if not isinstance(container, (dict, list, tuple, str)):
+            raise _UnsafeCondition("subscript on unsupported type")
+        return container[_safe_eval(node.slice, variables)]
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id in _SAFE_FUNCS and not node.keywords):
+        return _SAFE_FUNCS[node.func.id](*(_safe_eval(a, variables) for a in node.args))
+    raise _UnsafeCondition(f"unsupported expression: {type(node).__name__}")
+
+
 def _evaluate_condition(condition: str, variables: dict[str, Any]) -> bool:
     """Evaluate a plan condition string against collected variables.
-    Defaults to True on any error so the run isn't silently aborted."""
+
+    Only a small, safe expression subset is supported (see _safe_eval).
+    Defaults to True on any error (including plain-English conditions that
+    are not expressions) so the run isn't silently aborted."""
     if not condition:
         return True
     try:
-        return bool(eval(condition, {"__builtins__": {}}, dict(variables)))  # noqa: S307
-    except Exception:
+        return bool(_safe_eval(ast.parse(condition, mode="eval"), dict(variables)))
+    except Exception as e:
+        log.warning("condition %r not evaluable (%s: %s); defaulting to true",
+                    condition, type(e).__name__, e)
         return True
 
 
@@ -501,6 +563,13 @@ def run_plan(req: RunRequest) -> RunResponse:
             req.plan.id, req.plan.version,
         )
     # ───────────────────────────────────────────────────────────────────────
+
+    # Hosts the approved plan itself uses bound where the LLM may navigate.
+    browser_mode.set_navigation_allowlist(
+        [req.initial_url or ""]
+        + [str(s.details.get("url", "")) for s in req.plan.steps
+           if s.kind == StepKind.NAVIGATE]
+    )
 
     llm = GeminiClient()
     step_results: list[StepResult] = []

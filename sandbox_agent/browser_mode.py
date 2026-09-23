@@ -21,6 +21,7 @@ import logging
 import re
 import time
 from typing import Any
+from urllib.parse import urlsplit
 
 from playwright.sync_api import Page, TimeoutError as PWTimeoutError
 
@@ -132,6 +133,42 @@ RECENT_TURNS = 4
 # ---------------------------------------------------------------------------
 # Action parsing
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Navigation allowlist
+# ---------------------------------------------------------------------------
+# The LLM chooses `navigate` targets from page content it reads, so text
+# planted in a record (prompt injection) could otherwise steer a logged-in
+# browser to an attacker's site, e.g. with data in the query string. The
+# agent may only go to hosts the human-approved plan already uses, plus the
+# Salesforce domains a Lightning session legitimately moves between.
+_SALESFORCE_HOST_SUFFIXES = (
+    ".salesforce.com", ".force.com", ".salesforce-setup.com", ".visualforce.com",
+)
+_allowed_nav_hosts: set[str] = set()
+
+
+def set_navigation_allowlist(urls: list[str]) -> None:
+    """Record the hosts of the plan's own URLs as navigable for this run."""
+    _allowed_nav_hosts.clear()
+    for url in urls:
+        host = (urlsplit(str(url)).hostname or "").lower()
+        if host:
+            _allowed_nav_hosts.add(host)
+
+
+def navigation_blocked_reason(url: str) -> str | None:
+    """None if the agent may navigate to `url`, else why it may not."""
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https"):
+        return f"scheme {parts.scheme or '(none)'!r} is not allowed"
+    host = (parts.hostname or "").lower()
+    if not host:
+        return "URL has no host"
+    if host in _allowed_nav_hosts or host.endswith(_SALESFORCE_HOST_SUFFIXES):
+        return None
+    return f"host {host!r} is not used by this plan"
+
 
 def parse_action(text: str) -> dict | None:
     import re as _re
@@ -2158,26 +2195,51 @@ def _execute_action(page: Page, kind: str, action: dict, grounding) -> str:
 
     if kind == "navigate":
         url = str(action["url"])
+        blocked = navigation_blocked_reason(url)
+        if blocked:
+            return (f"BLOCKED: navigation to {url} refused ({blocked}). Stay "
+                    f"within the plan's application; use the UI to move around.")
         page.goto(url)
         return f"navigated to {url}"
 
     if kind == "open_app":
         # Enter a connected app already logged in. The backend injected a
-        # frontdoor path per provider; navigating to it 302-redirects into a
-        # logged-in session. The sandbox never sees the underlying token.
+        # frontdoor path per provider; POSTing to it (run token in the
+        # Authorization header, never in a URL) returns a one-time login URL
+        # for the browser. The sandbox never sees the underlying token.
         provider = str(action.get("provider", "salesforce")).lower()
         import os
+        import httpx
         backend_base = os.getenv("BACKEND_MCP_URL", "").rstrip("/")
         # Provider-specific path, injected by the backend at spawn, e.g.
-        # SALESFORCE_FRONTDOOR_PATH = "/sandbox/frontdoor/salesforce?run_token=..."
+        # SALESFORCE_FRONTDOOR_PATH = "/sandbox/frontdoor/salesforce"
         path = os.getenv(f"{provider.upper()}_FRONTDOOR_PATH", "")
         if not backend_base or not path:
             return (f"cannot open app '{provider}': not connected or no "
                     f"frontdoor path available for this run")
+        try:
+            resp = httpx.post(
+                backend_base + path,
+                json={"run_id": os.getenv("RUN_ID")},
+                headers={"Authorization": f"Bearer {os.getenv('RUN_TOKEN', '')}"},
+                timeout=30.0,
+            )
+        except httpx.HTTPError as e:
+            return f"cannot open app '{provider}': frontdoor request failed ({type(e).__name__})"
+        if resp.status_code >= 400:
+            try:
+                detail = resp.json().get("detail", "")
+            except Exception:
+                detail = ""
+            return (f"cannot open app '{provider}': could not build frontdoor "
+                    f"session ({resp.status_code}) {detail}").rstrip()
+        login_url = resp.json().get("url", "")
+        if not login_url:
+            return f"cannot open app '{provider}': frontdoor returned no URL"
         # domcontentloaded fires before LWC initializes any components -- use it
         # only as a fast signal that the redirect completed, then do a
         # provider-specific readiness poll so the next OBSERVE sees real UI.
-        page.goto(backend_base + path, wait_until="domcontentloaded")
+        page.goto(login_url, wait_until="domcontentloaded")
         if provider == "salesforce":
             return _wait_for_salesforce_ready(page)
         return f"opened {provider}, logged in"

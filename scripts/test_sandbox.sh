@@ -19,10 +19,16 @@ IMAGE="agent-sandbox:latest"
 echo "==> Building image (cached if no changes)"
 docker build -f sandbox/Dockerfile -t "$IMAGE" .
 
+# The sandbox's /run and live view are authenticated per run.
+RUN_TOKEN=$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')
+VNC_PASSWORD=$(python3 -c 'import secrets; print(secrets.token_urlsafe(6)[:8])')
+export RUN_TOKEN VNC_PASSWORD
+
 echo "==> Starting container"
 CID=$(docker run -d --rm \
-    -p 6080:6080 -p 8000:8000 \
+    -p 127.0.0.1:6080:6080 -p 127.0.0.1:8000:8000 \
     -e GEMINI_API_KEY="$GEMINI_API_KEY" \
+    -e RUN_TOKEN -e VNC_PASSWORD \
     --shm-size=2g \
     "$IMAGE")
 
@@ -38,7 +44,7 @@ for _ in {1..30}; do
     sleep 1
 done
 
-echo "==> Live view available at http://localhost:6080/vnc.html?autoconnect=1"
+echo "==> Live view available at http://localhost:6080/vnc.html?autoconnect=1&password=${VNC_PASSWORD}"
 echo "==> Sending demo plan"
 
 cat > /tmp/demo_plan.json <<'EOF'
@@ -71,6 +77,7 @@ EOF
 
 curl -fsS -X POST http://localhost:8000/run \
     -H "Content-Type: application/json" \
+    -H "Authorization: Bearer ${RUN_TOKEN}" \
     -d @/tmp/demo_plan.json | python3 -m json.tool
 
 echo ""
