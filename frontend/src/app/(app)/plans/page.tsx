@@ -1,8 +1,10 @@
 // app/(app)/plans/page.tsx — plans list with approve action, Repliq light theme.
 "use client";
 
+import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
+import { CapabilityPanel } from "@/components/CapabilityPanel";
 import type { Plan } from "@/lib/types";
 import { T, glass, primaryBtn, eyebrow } from "@/lib/theme";
 
@@ -22,6 +24,11 @@ export default function PlansPage() {
     queryKey: ["plans"],
     queryFn: () => api.get<Plan[]>("/plans"),
   });
+
+  // Which plans show their capability check. Plans awaiting approval show it
+  // by default, since that is when a missing field or permission matters.
+  const [checkOpen, setCheckOpen] = useState<Record<string, boolean>>({});
+  const isOpen = (p: Plan) => checkOpen[p.id] ?? p.status === "pending_approval";
 
   const approve = useMutation({
     mutationFn: (id: string) => api.post<Plan>(`/plans/${id}/approve`),
@@ -68,7 +75,16 @@ export default function PlansPage() {
                       </span>
                     </div>
                     {p.summary && <p style={{ margin: "0 0 12px", fontSize: 14.5, color: T.dim, lineHeight: 1.55 }}>{p.summary}</p>}
-                    <div style={{ fontSize: 13, color: T.faint }}>{p.steps?.length ?? 0} steps · v{p.version}</div>
+                    <div style={{ fontSize: 13, color: T.faint }}>
+                      {p.steps?.length ?? 0} steps · v{p.version}
+                      {" · "}
+                      <button
+                        onClick={() => setCheckOpen((s) => ({ ...s, [p.id]: !isOpen(p) }))}
+                        style={{ fontSize: 13, fontWeight: 600, color: T.violet, background: "transparent", border: "none", padding: 0, cursor: "pointer" }}
+                      >
+                        {isOpen(p) ? "Hide capability check" : "Check against my org"}
+                      </button>
+                    </div>
                   </div>
                   {p.status !== "approved" && (
                     <button
@@ -80,6 +96,7 @@ export default function PlansPage() {
                     </button>
                   )}
                 </div>
+                {isOpen(p) && <CapabilityPanel planId={p.id} version={p.version} />}
               </div>
             );
           })}
