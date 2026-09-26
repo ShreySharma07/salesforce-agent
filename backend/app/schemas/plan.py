@@ -164,6 +164,10 @@ class Plan(BaseModel):
 
     goal: str = Field(..., description="One-sentence statement of what this plan does")
     summary: str | None = Field(None, description="Multi-paragraph summary, optional")
+    app: str | None = Field(
+        None,
+        description="App pack this plan targets (e.g. 'salesforce'); None = inferred from its URLs",
+    )
     steps: list[Step] = Field(default_factory=list)
     decision_rules: list[DecisionRule] = Field(default_factory=list)
     required_credentials: list[Credential] = Field(default_factory=list)

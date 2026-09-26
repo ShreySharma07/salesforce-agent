@@ -57,8 +57,33 @@ export type PlanStatus =
 export interface Plan {
   id: string;
   goal: string;
+  app?: string | null;
   summary: string | null;
   status: PlanStatus;
   version: number;
   steps: { id: string; kind: string; description: string }[];
+}
+// GET /plans/{id}/capabilities — what a plan needs vs what the connected org,
+// user and agent have (backend: app/schemas/capability.py).
+export type CapabilityStatus = "available" | "missing" | "unknown";
+export type CapabilityCategory = "org" | "permission" | "agent";
+
+export interface CapabilityCheck {
+  category: CapabilityCategory;
+  kind: string;
+  name: string;
+  status: CapabilityStatus;
+  detail: string;
+  steps: string[];
+}
+
+export interface CapabilityReport {
+  plan_id: string;
+  plan_version: number;
+  app: string;
+  connected: boolean;
+  org_url: string | null;
+  checked_at: string;
+  checks: CapabilityCheck[];
+  counts: Record<CapabilityStatus, number>;
 }

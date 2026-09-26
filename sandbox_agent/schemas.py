@@ -51,6 +51,8 @@ class Plan(BaseModel):
     version: int = 1
     goal: str
     summary: str | None = None
+    # App pack name (e.g. "salesforce"); None = infer from the plan's URLs.
+    app: str | None = None
     steps: list[Step] = Field(default_factory=list)
     required_credentials: list[Credential] = Field(default_factory=list)
     source_video_id: str | None = None

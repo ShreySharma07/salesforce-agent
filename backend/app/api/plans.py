@@ -10,6 +10,8 @@ that exists but belongs to someone else returns 404 (no cross-tenant leak).
   GET  /plans/{id}               fetch one
   POST /plans/{id}/approve       mark APPROVED (validated first)
   POST /plans/{id}/correct       regenerate from plain-language feedback
+  GET  /plans/{id}/capabilities  what the plan needs vs what the connected org,
+                                 user and agent have (show before approving)
 """
 from __future__ import annotations
 
@@ -20,9 +22,12 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_scoped_repo_dep
 from app.config import get_settings
+from app.db.base import get_session
+from app.schemas.capability import CapabilityReport
 from app.core.guardrails import PlanValidationError, validate_plan
 from app.schemas.plan import Plan, PlanStatus
 from app.services.scoping import ScopedRepo
@@ -72,6 +77,23 @@ async def get_plan(plan_id: str, repo: ScopedRepo = Depends(get_scoped_repo_dep)
     if plan is None:
         raise HTTPException(404, f"plan {plan_id} not found")
     return plan
+
+
+@router.get("/{plan_id}/capabilities", response_model=CapabilityReport)
+async def plan_capabilities(plan_id: str, repo: ScopedRepo = Depends(get_scoped_repo_dep),
+                            session: AsyncSession = Depends(get_session)):
+    """Diff the plan's needs against the connected org, the user's permissions
+    and the agent's tools: "for this org I have these, I lack those".
+
+    Read-only: describe calls with the user's own token, nothing is changed.
+    Org checks come back `unknown` (not an error) when the app isn't connected.
+    """
+    from app.services.capabilities import check_plan_capabilities
+
+    plan = await repo.get_plan(plan_id)
+    if plan is None:
+        raise HTTPException(404, f"plan {plan_id} not found")
+    return await check_plan_capabilities(plan, session=session, user_id=repo.user_id)
 
 
 @router.post("/{plan_id}/approve", response_model=Plan)

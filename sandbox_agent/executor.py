@@ -25,6 +25,7 @@ log = logging.getLogger(__name__)
 from playwright.sync_api import Page, sync_playwright
 
 from sandbox_agent import browser_mode, computer_mode
+from sandbox_agent.packs import pack_for_plan
 from sandbox_agent.llm_client import GeminiClient
 from sandbox_agent.schemas import (
     ExecutionMode,
@@ -564,6 +565,12 @@ def run_plan(req: RunRequest) -> RunResponse:
         )
     # ───────────────────────────────────────────────────────────────────────
 
+    # The plan's app pack supplies app-specific prompt rules, page hooks,
+    # sequence primitives and trusted hosts for this whole run.
+    pack = pack_for_plan(req.plan)
+    browser_mode.set_active_pack(pack)
+    log.info("RUN PACK %s", pack.name)
+
     # Hosts the approved plan itself uses bound where the LLM may navigate.
     browser_mode.set_navigation_allowlist(
         [req.initial_url or ""]
@@ -749,7 +756,8 @@ def _run_sequence_step(
     raw_condition = step.success_condition or step.details.get("success_condition", "")
     if raw_condition:
         resolved_condition = _resolve_today(_interpolate(raw_condition, variables))
-        if browser_mode.check_sequence_condition(page, resolved_condition):
+        check = browser_mode.active_pack().check_condition
+        if check is not None and check(page, resolved_condition):
             return StepResult(
                 step_id=step.id,
                 status="succeeded",
@@ -771,7 +779,7 @@ def _run_sequence_step(
     for idx, sub in enumerate(sub_actions, start=1):
         sub_kind = sub.get("kind", "")
         sub_started = time.monotonic()
-        obs = browser_mode.execute_sequence_sub_action(page, sub_kind, sub)
+        obs = browser_mode.active_pack().execute_sequence_sub_action(page, sub_kind, sub)
         observations.append(f"[{sub_kind}] {obs}")
         seq_trace.append(LoopIteration(
             iteration=idx,
