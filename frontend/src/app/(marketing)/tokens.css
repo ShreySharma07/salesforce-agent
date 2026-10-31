@@ -1,0 +1,48 @@
+/* Repliq landing tokens. Scoped to .rq so the app routes keep their own system. */
+.rq {
+  --space-3xs: 2px; --space-2xs: 4px; --space-xs: 8px; --space-sm: 12px; --space-md: 16px; --space-lg: 24px; --space-xl: 40px; --space-2xl: 64px; --space-3xl: 96px; --space-4xl: 144px;
+  --text-xs: 0.8125rem; --text-sm: 0.875rem; --text-md: 1rem; --text-lg: 1.125rem; --text-xl: 1.375rem; --text-2xl: 1.75rem;
+  --text-display: clamp(2.75rem, 4.6vw + 0.9rem, 5rem);
+  --text-section: clamp(2rem, 2.2vw + 1.1rem, 3.25rem);
+  --text-title: clamp(1.125rem, 0.5vw + 0.95rem, 1.375rem);
+  --text-lead: clamp(1.125rem, 0.35vw + 1rem, 1.3125rem);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1); --ease-in: cubic-bezier(0.7, 0, 0.84, 0); --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --dur-micro: 120ms; --dur-short: 220ms; --dur-long: 420ms;
+  --container: 1240px; --gutter: 48px; --gap-columns: 32px; --section-gap: 144px;
+  --z-base: 1; --z-raised: 10; --z-sticky-nav: 300;
+
+  /* White paper, ice wells, a committed light-blue field, deep blue ink. */
+  --color-paper: oklch(99.3% 0.003 230);
+  --color-paper-2: oklch(97.2% 0.013 228);
+  --color-paper-3: oklch(94.4% 0.022 228);
+  --color-field: oklch(87% 0.072 226);
+  --color-field-2: oklch(79.5% 0.1 231);
+  --color-field-3: oklch(92.5% 0.045 220);
+  --color-ink: oklch(22% 0.05 256);
+  --color-ink-2: oklch(37% 0.045 256);
+  --color-muted: oklch(48% 0.032 250);
+  --color-rule: oklch(90.5% 0.017 240);
+  --color-accent: oklch(50% 0.165 253);
+  --color-accent-hi: oklch(44% 0.165 255);
+  --color-accent-ink: oklch(99.3% 0.003 230);
+  --color-accent-soft: oklch(94% 0.035 245);
+  --color-focus: oklch(52% 0.2 253);
+  /* Who did it: amber marks the person, blue marks the agent. */
+  --color-human: oklch(76% 0.145 68);
+  --color-human-ink: oklch(47% 0.11 60);
+  --color-success: oklch(48% 0.12 155);
+  --color-night: oklch(23% 0.055 257);
+  --color-night-2: oklch(28% 0.058 257);
+  --color-night-rule: oklch(40% 0.06 250);
+  --color-night-ink: oklch(96% 0.012 235);
+  --color-night-muted: oklch(80% 0.04 238);
+
+  --font-display: var(--rq-display), "Rethink Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-body: var(--rq-body), "Onest", ui-sans-serif, system-ui, sans-serif;
+
+  --radius-panel: 14px; --radius-inner: 8px; --radius-pill: 999px;
+  --shadow-panel: 0 1px 2px oklch(20% 0.03 256 / 0.06), 0 24px 48px -24px oklch(30% 0.08 250 / 0.28);
+  --tracking-display: -0.035em;
+}
+@media (max-width: 60rem) { .rq { --gutter: 24px; --section-gap: 104px; } }
+@media (max-width: 40rem) { .rq { --gutter: 18px; --section-gap: 80px; --gap-columns: 16px; } }
