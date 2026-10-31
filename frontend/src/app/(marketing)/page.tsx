@@ -5,6 +5,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import "./landing.css";
 import { PlanReview } from "./PlanReview";
+import { AmbientMotion } from "./AmbientMotion";
 
 export const metadata: Metadata = {
   title: "Repliq: show a Salesforce task once, then hand it over",
@@ -15,32 +16,34 @@ export const metadata: Metadata = {
 const DEMO_URL = "https://youtu.be/gEhxQjRQ6XI";
 const PAPER_URL = "/repliq-white-paper.pdf";
 
-/* A deterministic waveform for the narration track of the hero field. */
-function waveform(width: number, mid: number, amp: number) {
+/* A deterministic narration waveform, periodic over `period` so it can loop
+   seamlessly as the timeline drifts. */
+const TAU = Math.PI * 2;
+function waveform(period: number, copies: number, mid: number, amp: number) {
   const pts: string[] = [];
-  for (let x = 0; x <= width; x += 8) {
-    const y =
-      Math.sin(x / 23) * 0.5 +
-      Math.sin(x / 7.3) * 0.3 +
-      Math.sin(x / 61) * 0.6;
-    const h = Math.abs(y) * amp * (0.45 + 0.55 * Math.abs(Math.sin(x / 140)));
+  for (let x = 0; x <= period * copies; x += 8) {
+    const t = x / period;
+    const y = Math.sin(TAU * 77 * t) * 0.5 + Math.sin(TAU * 241 * t) * 0.3 + Math.sin(TAU * 29 * t) * 0.6;
+    const h = Math.abs(y) * amp * (0.45 + 0.55 * Math.abs(Math.sin(TAU * 6 * t)));
     pts.push(`M${x} ${(mid - h).toFixed(1)}V${(mid + h).toFixed(1)}`);
   }
   return pts.join("");
 }
 
 function HeroField() {
-  const frames = Array.from({ length: 40 }, (_, i) => i * 44);
+  const frames = Array.from({ length: 44 }, (_, i) => i * 44);
   return (
-    <div className="rq-field" aria-hidden="true">
+    <div className="rq-field" aria-hidden="true" data-ambient>
       <svg viewBox="0 0 1760 640" preserveAspectRatio="none" className="rq-field-svg">
         <rect className="f-base" x="0" y="0" width="1760" height="640" />
         <rect className="f-track-a" x="0" y="404" width="1760" height="72" />
-        <path className="f-wave" d={waveform(1760, 440, 26)} />
+        <g className="f-wave-run"><path className="f-wave" d={waveform(1760, 2, 440, 26)} /></g>
         <rect className="f-track-b" x="0" y="476" width="1760" height="100" />
-        {frames.map((x) => (
-          <rect key={x} className="f-frame" x={x + 6} y="490" width="34" height="72" rx="3" />
-        ))}
+        <g className="f-frame-run">
+          {frames.map((x) => (
+            <rect key={x} className="f-frame" x={x + 6} y="490" width="34" height="72" rx="3" />
+          ))}
+        </g>
         <rect className="f-track-c" x="0" y="576" width="1760" height="64" />
         <rect className="f-head" x="1268" y="392" width="3" height="248" />
       </svg>
@@ -243,18 +246,27 @@ export default function Landing() {
         </section>
       </main>
 
-      <footer className="rq-footer">
+      <footer className="rq-footer" data-ambient>
+        <div className="rq-aurora" aria-hidden="true">
+          <span className="rq-aurora-band rq-aurora-band--steel" />
+          <span className="rq-aurora-band rq-aurora-band--purple" />
+          <span className="rq-aurora-band rq-aurora-band--blue" />
+          <span className="rq-aurora-band rq-aurora-band--pink" />
+        </div>
         <div className="container rq-footer-inner">
-          <div>
-            <p className="rq-wordmark">Repliq</p>
-            <p className="rq-footer-note">A proof of concept for demonstration‑guided automation.</p>
-          </div>
+          <p className="rq-footer-note">A proof of concept for demonstration‑guided automation.</p>
           <ul className="rq-footer-links">
             <li><a href={DEMO_URL} target="_blank" rel="noreferrer">Demo video</a></li>
             <li><a href={PAPER_URL}>White paper</a></li>
             <li><Link href="/login">Sign in</Link></li>
           </ul>
-          <p className="rq-footer-copy">© 2026 Repliq</p>
+          <div className="rq-footer-meta">
+            <p className="rq-footer-copy">© 2026 Repliq</p>
+            <AmbientMotion />
+          </div>
+        </div>
+        <div className="container rq-footer-markwrap">
+          <p className="rq-footer-mark">Repliq</p>
         </div>
       </footer>
     </>

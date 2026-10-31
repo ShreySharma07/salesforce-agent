@@ -37,6 +37,16 @@
   --color-night-ink: oklch(96% 0.012 235);
   --color-night-muted: oklch(80% 0.04 238);
 
+  /* Glass: paper at partial opacity over the blurred timeline. */
+  --color-glass: oklch(99.3% 0.003 230 / 0.56);
+  --color-glass-2: oklch(97.2% 0.013 228 / 0.6);
+  --color-glass-edge: oklch(100% 0 0 / 0.7);
+  /* Footer aurora, by the user's request: purple, blue, pink and steel grey on night. */
+  --color-aurora-purple: oklch(58% 0.2 300);
+  --color-aurora-blue: oklch(62% 0.17 255);
+  --color-aurora-pink: oklch(70% 0.17 352);
+  --color-aurora-steel: oklch(62% 0.03 250);
+
   --font-display: var(--rq-display), "Rethink Sans", ui-sans-serif, system-ui, sans-serif;
   --font-body: var(--rq-body), "Onest", ui-sans-serif, system-ui, sans-serif;
 
