@@ -14,10 +14,10 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
   const logout = useLogout();
 
   useEffect(() => {
-    if (!isLoading && user === null) router.replace("/login");
+    if (!isLoading && !user) router.replace("/login");
   }, [isLoading, user, router]);
 
-  if (isLoading || user === null) {
+  if (isLoading || !user) {
     return (
       <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", gap: 10, background: T.pageBg, color: T.body, fontSize: 14 }}>
         <span style={{ width: 8, height: 8, borderRadius: "50%", background: "#22c55e", animation: "blink 1.6s ease-in-out infinite" }} />
