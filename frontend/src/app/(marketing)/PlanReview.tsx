@@ -1,5 +1,5 @@
 // app/(marketing)/PlanReview.tsx
-// The hero's product panel: a plan drafted from a recording that asks one
+// The plan panel: a plan drafted from a recording that asks one
 // question before it can be approved. The answer is shared with the rest of
 // the page through the story context.
 "use client";
@@ -19,13 +19,13 @@ export function PlanReview() {
   return (
     <figure className="rq-plan" aria-label="Example plan drafted from a recording">
       <header className="rq-plan-head">
-        <div>
-          <h2 className="rq-plan-title">Escalate urgent cases on open deals</h2>
+        <h2 className="rq-plan-title">Escalate urgent cases on open deals</h2>
+        <div className="rq-plan-metarow">
           <p className="rq-plan-meta"><span className="rq-who rq-who--you">Drafted from your recording</span></p>
+          <p className="rq-plan-state" role="status" data-approved={approved}>
+            {approved ? "Approved · ready to run" : "Needs review"}
+          </p>
         </div>
-        <p className="rq-plan-state" role="status" data-approved={approved}>
-          {approved ? "Approved" : "Needs review"}
-        </p>
       </header>
 
       <ol className="rq-plan-steps">
@@ -34,7 +34,6 @@ export function PlanReview() {
             <span className="rq-step-n num" aria-hidden="true">{i + 1}</span>
             <div className="rq-step-body">
               <p className="rq-step-text">{s.text}</p>
-              {approved && <p className="rq-step-src"><span className="rq-who rq-who--agent" data-on="true">Agent done</span></p>}
               {s.asks && (
                 <fieldset className="rq-ask" disabled={approved}>
                   <legend className="rq-ask-q">You chose High here. Should every urgent case get it?</legend>
@@ -62,7 +61,7 @@ export function PlanReview() {
         </button>
         <p className="rq-plan-hint">
           {approved
-            ? "Approved. Scroll to see what happens next."
+            ? "Approved. Next, it becomes a tool."
             : answer === null
               ? "Answer the question to approve."
               : "Nothing runs until you approve."}

@@ -43,11 +43,16 @@
   --color-night-accent: oklch(72% 0.13 263);
   --color-night-success: oklch(78% 0.14 160);
 
-  /* Footer aurora: cobalt, emerald, amber and stone on obsidian. */
-  --color-aurora-cobalt: oklch(52% 0.19 263);
-  --color-aurora-emerald: oklch(60% 0.14 163);
-  --color-aurora-amber: oklch(76% 0.15 72);
-  --color-aurora-stone: oklch(62% 0.02 80);
+  /* Footer: bi-tonal cobalt and emerald on near-black, with fluted ribs. */
+  --color-night-deep: #07080C;
+  --color-aurora-cobalt: #1D4ED8;
+  --color-aurora-emerald: #059669;
+
+  /* Dark machined glass for the Impact tool card. */
+  --color-machined: rgb(18 21 30 / 0.95);
+  --color-machined-edge: rgb(255 255 255 / 0.15);
+  --color-machined-ink: oklch(96% 0.004 260);
+  --color-machined-muted: oklch(78% 0.008 260);
 
   --font-mono: var(--rq-mono), "JetBrains Mono", ui-monospace, monospace;
   --font-display: var(--rq-display), "Rethink Sans", ui-sans-serif, system-ui, sans-serif;
