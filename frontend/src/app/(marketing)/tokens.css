@@ -11,48 +11,51 @@
   --container: 1240px; --gutter: 48px; --gap-columns: 32px; --section-gap: 144px;
   --z-base: 1; --z-raised: 10; --z-sticky-nav: 300;
 
-  /* White paper, ice wells, a committed light-blue field, deep blue ink. */
-  --color-paper: oklch(99.3% 0.003 230);
-  --color-paper-2: oklch(97.2% 0.013 228);
-  --color-paper-3: oklch(94.4% 0.022 228);
-  --color-field: oklch(87% 0.072 226);
-  --color-field-2: oklch(79.5% 0.1 231);
-  --color-field-3: oklch(92.5% 0.045 220);
-  --color-ink: oklch(22% 0.05 256);
-  --color-ink-2: oklch(37% 0.045 256);
-  --color-muted: oklch(48% 0.032 250);
-  --color-rule: oklch(90.5% 0.017 240);
-  --color-accent: oklch(50% 0.165 253);
-  --color-accent-hi: oklch(44% 0.165 255);
-  --color-accent-ink: oklch(99.3% 0.003 230);
-  --color-accent-soft: oklch(94% 0.035 245);
-  --color-focus: oklch(52% 0.2 253);
-  /* Who did it: amber marks the person, blue marks the agent. */
-  --color-human: oklch(76% 0.145 68);
-  --color-human-ink: oklch(47% 0.11 60);
-  --color-success: oklch(48% 0.12 155);
-  --color-night: oklch(23% 0.055 257);
-  --color-night-2: oklch(28% 0.058 257);
-  --color-night-rule: oklch(40% 0.06 250);
-  --color-night-ink: oklch(96% 0.012 235);
-  --color-night-muted: oklch(80% 0.04 238);
+  /* Warm editorial stone and alabaster, deep obsidian ink. */
+  --color-paper: oklch(97.2% 0.006 85);      /* alabaster */
+  --color-paper-2: oklch(94.6% 0.009 80);    /* stone 1 */
+  --color-paper-3: oklch(90.8% 0.012 78);    /* stone 2 */
+  --color-rule: oklch(87.5% 0.013 76);
+  --color-ink: oklch(18.5% 0.012 262);       /* obsidian */
+  --color-ink-2: oklch(33% 0.012 262);
+  --color-muted: oklch(44% 0.012 262);       /* >= 6:1 on alabaster */
+  --color-white: oklch(99.4% 0.003 85);
 
-  /* Glass: paper at partial opacity over the blurred timeline. */
-  --color-glass: oklch(99.3% 0.003 230 / 0.56);
-  --color-glass-2: oklch(97.2% 0.013 228 / 0.6);
-  --color-glass-edge: oklch(100% 0 0 / 0.7);
-  /* Footer aurora, by the user's request: purple, blue, pink and steel grey on night. */
-  --color-aurora-purple: oklch(58% 0.2 300);
-  --color-aurora-blue: oklch(62% 0.17 255);
-  --color-aurora-pink: oklch(70% 0.17 352);
-  --color-aurora-steel: oklch(62% 0.03 250);
+  /* Semantic accents: cobalt acts, emerald confirms, amber is the person. */
+  --color-accent: oklch(47% 0.175 263);      /* cobalt */
+  --color-accent-hi: oklch(41% 0.175 264);
+  --color-accent-ink: oklch(99.4% 0.003 85);
+  --color-accent-soft: oklch(92.5% 0.035 263);
+  --color-focus: oklch(52% 0.2 263);
+  --color-success: oklch(50% 0.12 160);      /* emerald */
+  --color-success-soft: oklch(92.5% 0.04 162);
+  --color-human: oklch(75% 0.15 70);         /* amber */
+  --color-human-ink: oklch(47% 0.11 62);
+  --color-human-soft: oklch(93.5% 0.05 80);
 
+  /* Obsidian surfaces. */
+  --color-night: oklch(17.5% 0.01 262);
+  --color-night-2: oklch(22.5% 0.012 262);
+  --color-night-3: oklch(27% 0.012 262);
+  --color-night-rule: oklch(35% 0.012 262);
+  --color-night-ink: oklch(96.5% 0.006 85);
+  --color-night-muted: oklch(80% 0.01 85);   /* >= 8:1 on obsidian */
+  --color-night-accent: oklch(72% 0.13 263);
+  --color-night-success: oklch(78% 0.14 160);
+
+  /* Footer aurora: cobalt, emerald, amber and stone on obsidian. */
+  --color-aurora-cobalt: oklch(52% 0.19 263);
+  --color-aurora-emerald: oklch(60% 0.14 163);
+  --color-aurora-amber: oklch(76% 0.15 72);
+  --color-aurora-stone: oklch(62% 0.02 80);
+
+  --font-mono: var(--rq-mono), "JetBrains Mono", ui-monospace, monospace;
   --font-display: var(--rq-display), "Rethink Sans", ui-sans-serif, system-ui, sans-serif;
   --font-body: var(--rq-body), "Onest", ui-sans-serif, system-ui, sans-serif;
 
   --radius-panel: 14px; --radius-inner: 8px; --radius-pill: 999px;
-  --shadow-panel: 0 1px 2px oklch(20% 0.03 256 / 0.06), 0 24px 48px -24px oklch(30% 0.08 250 / 0.28);
-  --tracking-display: -0.035em;
+  --shadow-panel: 0 1px 2px oklch(20% 0.012 262 / 0.06), 0 24px 48px -24px oklch(25% 0.02 262 / 0.28);
+  --tracking-display: -0.03em;
 }
 @media (max-width: 60rem) { .rq { --gutter: 24px; --section-gap: 104px; } }
 @media (max-width: 40rem) { .rq { --gutter: 18px; --section-gap: 80px; --gap-columns: 16px; } }
